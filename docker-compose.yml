@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ecommerce-postgres
+    environment:
+      POSTGRES_USER: catalog_user
+      POSTGRES_PASSWORD: catalog_password
+      POSTGRES_DB: catalog
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U catalog_user -d catalog"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  catalog-service:
+    build:
+      context: ./catalog-service
+      dockerfile: Dockerfile
+    container_name: catalog-service
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    environment:
+      DB_USERNAME: catalog_user
+      DB_PASSWORD: catalog_password
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/catalog
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
