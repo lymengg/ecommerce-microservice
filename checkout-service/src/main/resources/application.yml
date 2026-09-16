@@ -1,0 +1,20 @@
+spring:
+  application:
+    name: checkout-service
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+server:
+  port: ${SERVER_PORT:8086}
+
+ecommerce:
+  cart:
+    base-url: ${CART_SERVICE_URL:http://localhost:8082}
+  order:
+    base-url: ${ORDER_SERVICE_URL:http://localhost:8084}
+  inventory:
+    base-url: ${INVENTORY_SERVICE_URL:http://localhost:8083}
+  payment:
+    base-url: ${PAYMENT_SERVICE_URL:http://localhost:8085}

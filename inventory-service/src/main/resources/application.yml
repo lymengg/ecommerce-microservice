@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: inventory-service
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:ecommerce_inventory}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+server:
+  port: ${SERVER_PORT:8083}
+
+ecommerce:
+  inventory:
+    reservation-ttl: ${RESERVATION_TTL:PT30M}
+    expiry-interval-ms: ${EXPIRY_INTERVAL_MS:60000}

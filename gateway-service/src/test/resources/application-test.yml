@@ -1,0 +1,16 @@
+spring:
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            - id: catalog-service
+              uri: http://localhost:18080
+              predicates:
+                - Path=/api/v1/products/**
+
+ecommerce:
+  gateway:
+    rate-limit:
+      enabled: true
+      max-requests-per-minute: 1000

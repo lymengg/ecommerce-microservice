@@ -1,0 +1,39 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: gateway-service
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            - id: catalog-service
+              uri: ${CATALOG_SERVICE_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/v1/products/**
+            - id: cart-service
+              uri: ${CART_SERVICE_URL:http://localhost:8082}
+              predicates:
+                - Path=/api/v1/cart/**
+            - id: order-service
+              uri: ${ORDER_SERVICE_URL:http://localhost:8084}
+              predicates:
+                - Path=/api/v1/orders/**
+            - id: payment-service
+              uri: ${PAYMENT_SERVICE_URL:http://localhost:8085}
+              predicates:
+                - Path=/api/v1/payments/**
+            - id: checkout-service
+              uri: ${CHECKOUT_SERVICE_URL:http://localhost:8086}
+              predicates:
+                - Path=/api/v1/checkout/**
+
+ecommerce:
+  gateway:
+    rate-limit:
+      enabled: ${RATE_LIMIT_ENABLED:true}
+      # coarse-grained fixed-window limit per client IP; Redis-backed limiting
+      # arrives with the Phase 8 infrastructure
+      max-requests-per-minute: ${RATE_LIMIT_MAX_REQUESTS_PER_MINUTE:100}
