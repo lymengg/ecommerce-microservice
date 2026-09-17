@@ -3,6 +3,7 @@ package com.ecommerce.integration;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import com.ecommerce.order.OrderServiceApplication;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -11,6 +12,9 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
+import static com.github.tomakehurst.wiremock.client.WireMock.post;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 
 /**
@@ -40,6 +44,16 @@ public abstract class AbstractIntegrationTest {
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
         registry.add("ecommerce.catalog.base-url", () -> "http://localhost:" + WIRE_MOCK.port());
+        registry.add("ecommerce.security.service-client.token-uri",
+                () -> "http://localhost:" + WIRE_MOCK.port() + "/token");
+    }
+
+    @BeforeEach
+    void stubServiceToken() {
+        WIRE_MOCK.stubFor(post(urlEqualTo("/token"))
+                .willReturn(okJson("""
+                        {"access_token":"test-service-token","expires_in":300,"token_type":"Bearer"}
+                        """)));
     }
 
     @AfterEach

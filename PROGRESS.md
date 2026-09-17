@@ -20,7 +20,8 @@ Testcontainers + Keycloak container); unit + Docker-free ITs verified green
 - **Shared security module (`common`)** — `ServiceSecurityConfig`
   (stateless OAuth2 resource server, Keycloak `realm_access.roles` →
   `ROLE_*` via `KeycloakJwtAuthoritiesConverter`, JSON 401/403, configurable
-  `ecommerce.security.permit-all`, @Lazy JwtDecoder so services/tests start
+  `ecommerce.security.permit-all`, lazy issuer-discovery JwtDecoder so
+  services/tests start
   without Keycloak); `SecurityUtils`; `ClientCredentialsTokenProvider`
   (client-credentials SERVICE tokens, cached, `service-client.enabled` flag);
   `RestClients.createWithServiceToken`.
@@ -77,7 +78,8 @@ mvn -pl gateway-service test -Dtest='!GatewayKeycloakIT'   # Docker-free gateway
 Manual end-to-end flow (documented in README.md "Manual checkout flow"):
 1. `docker compose up -d keycloak`, Postgres + 5 databases (README SQL).
 2. `mvn -B package -DskipTests`, start services (Keycloak must be reachable
-   for token issuance; JWT decoders are @Lazy so startup order is flexible).
+   for token issuance; JWT decoders resolve the issuer lazily on first token
+   validation — `LazyIssuerJwtDecoder` — so startup order is flexible).
 3. Get tokens via `test-client` password grant (customer1/admin1) and
    `service-client` client-credentials; curl through the gateway with
    `Authorization: Bearer ...` → expect `PAID` + committed stock; a price

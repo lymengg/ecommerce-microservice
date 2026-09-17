@@ -1,10 +1,10 @@
 package com.ecommerce.gateway.config;
 
 import com.ecommerce.gateway.security.KeycloakJwtAuthoritiesConverter;
+import com.ecommerce.gateway.security.LazyIssuerReactiveJwtDecoder;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -12,7 +12,6 @@ import org.springframework.http.server.reactive.ServerHttpResponse;
 import org.springframework.security.config.annotation.web.reactive.EnableWebFluxSecurity;
 import org.springframework.security.config.web.server.ServerHttpSecurity;
 import org.springframework.security.oauth2.jwt.JwtException;
-import org.springframework.security.oauth2.jwt.NimbusReactiveJwtDecoder;
 import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.oauth2.server.resource.authentication.ReactiveJwtAuthenticationConverterAdapter;
@@ -64,17 +63,16 @@ public class GatewaySecurityConfig {
     }
 
     /**
-     * Lazy decoder bound to the Keycloak issuer: the gateway starts without
+     * Decoder bound to the Keycloak issuer: the gateway starts without
      * Keycloak being reachable, and OIDC discovery happens on the first token
      * validation rather than at startup.
      */
     @Bean
-    @Lazy
     ReactiveJwtDecoder reactiveJwtDecoder(@Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri:}") String issuerUri) {
         if (issuerUri == null || issuerUri.isBlank()) {
             return token -> Mono.error(new JwtException("No JWT issuer-uri configured; cannot validate access tokens"));
         }
-        return NimbusReactiveJwtDecoder.withIssuerLocation(issuerUri).build();
+        return new LazyIssuerReactiveJwtDecoder(issuerUri);
     }
 
     @Bean

@@ -22,8 +22,6 @@
   "accessTokenLifespanForImplicitFlow": 900,
   "ssoSessionIdleTimeout": 1800,
   "ssoSessionMaxLifespan": 36000,
-  "refreshTokenLifespan": 1800,
-  "refreshTokenMaxReuse": 0,
   "defaultSignatureAlgorithm": "RS256",
   "roles": {
     "realm": [

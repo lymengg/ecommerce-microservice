@@ -2,6 +2,7 @@ package com.ecommerce.common.error;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -45,6 +46,17 @@ public class GlobalExceptionHandler {
         problem.setTitle("Insufficient Stock");
         problem.setType(URI.create("urn:problem:insufficient-stock"));
         return problem;
+    }
+
+    /**
+     * Method-security (and service-level) access denials must not be swallowed
+     * by the generic handler: rethrow so Spring Security's
+     * ExceptionTranslationFilter maps them to the JSON 403 from
+     * {@code ServiceSecurityConfig}.
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    public void handleAccessDenied(AccessDeniedException ex) throws AccessDeniedException {
+        throw ex;
     }
 
     @ExceptionHandler(Exception.class)

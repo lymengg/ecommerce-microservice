@@ -6,7 +6,6 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplicat
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
@@ -18,7 +17,6 @@ import org.springframework.security.config.annotation.web.configurers.AbstractHt
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtException;
-import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
@@ -62,19 +60,18 @@ public class ServiceSecurityConfig {
     }
 
     /**
-     * Lazy JWT decoder bound to the Keycloak issuer. Lazy so that services
-     * (and their tests) start without Keycloak being reachable: the OIDC
-     * discovery happens on the first token validation, not at startup.
+     * JWT decoder bound to the Keycloak issuer. Discovery from the issuer URI
+     * happens lazily (first token validation), so services and their tests
+     * start without Keycloak being reachable.
      */
     @Bean
-    @Lazy
     JwtDecoder jwtDecoder(@Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri:}") String issuerUri) {
         if (issuerUri == null || issuerUri.isBlank()) {
             return token -> {
                 throw new JwtException("No JWT issuer-uri configured; cannot validate access tokens");
             };
         }
-        return NimbusJwtDecoder.withIssuerLocation(issuerUri).build();
+        return new LazyIssuerJwtDecoder(issuerUri);
     }
 
     /**

@@ -4,6 +4,7 @@ import com.ecommerce.common.security.KeycloakJwtAuthoritiesConverter;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import com.ecommerce.checkout.CheckoutServiceApplication;
@@ -18,6 +19,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
@@ -40,6 +43,7 @@ abstract class AbstractCheckoutIT {
     static final UUID CART_ID = UUID.randomUUID();
     static final UUID ORDER_ID = UUID.randomUUID();
     static final UUID PAYMENT_ID = UUID.randomUUID();
+    static final UUID CUSTOMER_ID = UUID.fromString("00000000-0000-0000-0000-0000000000c9");
 
     static {
         WIRE_MOCK.start();
@@ -55,6 +59,16 @@ abstract class AbstractCheckoutIT {
         registry.add("ecommerce.order.base-url", () -> baseUrl);
         registry.add("ecommerce.inventory.base-url", () -> baseUrl);
         registry.add("ecommerce.payment.base-url", () -> baseUrl);
+        registry.add("ecommerce.security.service-client.token-uri",
+                () -> "http://localhost:" + WIRE_MOCK.port() + "/token");
+    }
+
+    @BeforeEach
+    void stubServiceToken() {
+        WIRE_MOCK.stubFor(com.github.tomakehurst.wiremock.client.WireMock.post(urlEqualTo("/token"))
+                .willReturn(okJson("""
+                        {"access_token":"test-service-token","expires_in":300,"token_type":"Bearer"}
+                        """)));
     }
 
     @AfterEach
@@ -64,7 +78,8 @@ abstract class AbstractCheckoutIT {
 
     ResultActions checkout(String idempotencyKey) throws Exception {
         var request = post("/api/v1/checkout")
-                .with(jwt().jwt(j -> j.claim("realm_access", Map.of("roles", List.of("CUSTOMER"))))
+                .with(jwt().jwt(j -> j.subject(CUSTOMER_ID.toString())
+                                .claim("realm_access", Map.of("roles", List.of("CUSTOMER"))))
                         .authorities(new KeycloakJwtAuthoritiesConverter()))
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"cartId\":\"" + CART_ID + "\",\"currency\":\"USD\"}");
