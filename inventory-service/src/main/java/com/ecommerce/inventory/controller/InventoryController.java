@@ -8,6 +8,7 @@ import com.ecommerce.inventory.dto.StockResponse;
 import com.ecommerce.inventory.service.InventoryService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -21,6 +22,7 @@ import java.util.UUID;
 
 @RestController
 @RequestMapping("/internal/api/v1/inventory")
+@PreAuthorize("hasRole('SERVICE')")
 public class InventoryController {
 
     private final InventoryService inventoryService;

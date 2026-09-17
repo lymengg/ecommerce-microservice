@@ -1,5 +1,6 @@
 package com.ecommerce.integration;
 
+import com.ecommerce.common.security.KeycloakJwtAuthoritiesConverter;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -13,10 +14,13 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 import static org.hamcrest.Matchers.containsString;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -60,6 +64,8 @@ abstract class AbstractCheckoutIT {
 
     ResultActions checkout(String idempotencyKey) throws Exception {
         var request = post("/api/v1/checkout")
+                .with(jwt().jwt(j -> j.claim("realm_access", Map.of("roles", List.of("CUSTOMER"))))
+                        .authorities(new KeycloakJwtAuthoritiesConverter()))
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"cartId\":\"" + CART_ID + "\",\"currency\":\"USD\"}");
         if (idempotencyKey != null) {

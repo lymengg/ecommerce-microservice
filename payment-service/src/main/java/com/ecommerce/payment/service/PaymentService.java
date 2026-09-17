@@ -3,6 +3,8 @@ package com.ecommerce.payment.service;
 import com.ecommerce.common.error.ConflictException;
 import com.ecommerce.common.error.NotFoundException;
 import com.ecommerce.common.outbox.OutboxService;
+import com.ecommerce.common.security.SecurityRoles;
+import com.ecommerce.common.security.SecurityUtils;
 import com.ecommerce.payment.client.OrderClient;
 import com.ecommerce.payment.client.OrderInfo;
 import com.ecommerce.payment.dto.PaymentInitiateRequest;
@@ -25,6 +27,7 @@ import com.ecommerce.payment.repository.PaymentRepository;
 import com.ecommerce.payment.repository.ProviderTransactionRepository;
 import com.ecommerce.payment.repository.RefundRepository;
 import com.ecommerce.payment.repository.WebhookEventRepository;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -67,21 +70,22 @@ public class PaymentService {
         if (idempotencyKey != null) {
             Payment existing = paymentRepository.findByIdempotencyKey(idempotencyKey).orElse(null);
             if (existing != null) {
-                return toResponse(existing);
+                return toResponse(requireOwnedOrService(existing));
             }
         }
         Payment existingByOrder = paymentRepository.findByOrderId(request.orderId()).orElse(null);
         if (existingByOrder != null) {
-            return toResponse(existingByOrder);
+            return toResponse(requireOwnedOrService(existingByOrder));
         }
 
         OrderInfo order = orderClient.getOrder(request.orderId());
         if ("CANCELLED".equals(order.status())) {
             throw new ConflictException("Cannot initiate payment for cancelled order " + request.orderId());
         }
+        UUID customerId = resolveCustomerId(order);
 
         Payment payment = paymentRepository.save(new Payment(
-                request.orderId(), order.total(), order.currency(), idempotencyKey
+                request.orderId(), customerId, order.total(), order.currency(), idempotencyKey
         ));
         PaymentAttempt attempt = attemptRepository.save(new PaymentAttempt(
                 payment.getId(), PaymentGateway.PROVIDER_NAME, 1, AttemptStatus.PROCESSING
@@ -165,8 +169,52 @@ public class PaymentService {
 
     @Transactional(readOnly = true)
     public PaymentResponse get(UUID paymentId) {
-        return toResponse(paymentRepository.findById(paymentId)
-                .orElseThrow(() -> new NotFoundException("Payment not found: " + paymentId)));
+        Payment payment = paymentRepository.findById(paymentId)
+                .orElseThrow(() -> new NotFoundException("Payment not found: " + paymentId));
+        if (SecurityUtils.isService()) {
+            throw new AccessDeniedException("Service callers cannot read payments through this endpoint");
+        }
+        return toResponse(requireAccessible(payment));
+    }
+
+    /**
+     * Identity of the payment's customer. For user tokens the order must
+     * belong to the caller; SERVICE callers (the checkout orchestrator) are
+     * trusted because checkout has already validated the end user.
+     */
+    private UUID resolveCustomerId(OrderInfo order) {
+        if (SecurityUtils.isService()) {
+            return order.customerId();
+        }
+        UUID subject = SecurityUtils.currentCustomerId();
+        if (subject == null || !subject.equals(order.customerId())) {
+            throw new AccessDeniedException("Order does not belong to the authenticated customer");
+        }
+        return subject;
+    }
+
+    /** Ownership check for idempotent replay: customers only reach their own payments. */
+    private Payment requireOwnedOrService(Payment payment) {
+        if (SecurityUtils.isService() || SecurityUtils.hasRole(SecurityRoles.ADMIN)) {
+            return payment;
+        }
+        return requireAccessible(payment);
+    }
+
+    /**
+     * Object-level authorization (OWASP A01): a customer may only read their
+     * own payments; other customers' payments are indistinguishable from
+     * missing ones (404).
+     */
+    private Payment requireAccessible(Payment payment) {
+        if (SecurityUtils.hasRole(SecurityRoles.ADMIN)) {
+            return payment;
+        }
+        UUID subject = SecurityUtils.currentCustomerId();
+        if (subject == null || !subject.equals(payment.getCustomerId())) {
+            throw new NotFoundException("Payment not found: " + payment.getId());
+        }
+        return payment;
     }
 
     private void recordOutcome(Payment payment, PaymentStatus status) {

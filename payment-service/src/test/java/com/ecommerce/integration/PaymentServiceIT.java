@@ -14,6 +14,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.UUID;
 
+import static com.ecommerce.integration.TestSecurity.asUser;
+
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlMatching;
@@ -22,6 +24,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class PaymentServiceIT extends AbstractIntegrationTest {
 
     private static final UUID ORDER_ID = UUID.randomUUID();
+    private static final UUID CUSTOMER_ID = UUID.fromString("00000000-0000-0000-0000-0000000000f2");
 
     @Autowired
     private PaymentService paymentService;
@@ -37,12 +40,13 @@ class PaymentServiceIT extends AbstractIntegrationTest {
 
     @BeforeEach
     void stubOrder() {
+        asUser(CUSTOMER_ID, "CUSTOMER");
         WIRE_MOCK.stubFor(get(urlMatching("/api/v1/orders/" + ORDER_ID))
                 .willReturn(okJson("""
-                        {"orderId":"%s","customerId":null,"status":"PENDING","currency":"USD",
+                        {"orderId":"%s","customerId":"%s","status":"PENDING","currency":"USD",
                          "subtotal":100.00,"discount":0,"tax":10.00,"shippingCost":0,"total":110.00,
                          "createdAt":"2026-01-01T00:00:00Z","items":[]}
-                        """.formatted(ORDER_ID))));
+                        """.formatted(ORDER_ID, CUSTOMER_ID))));
     }
 
     @Test

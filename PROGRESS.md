@@ -1,31 +1,61 @@
 # Project Progress — session handoff
 
-Last updated: 2026-09-16 (Phase 3 complete, committed and pushed)
+Last updated: 2026-09-17 (Phase 4 security complete)
 
-## Status: Phase 3 (Service Extraction) — DONE
+## Status: Phase 4 (Security) — DONE (uncommitted)
 
-- Commit: `3c7f84f` — `feat: extract catalog, cart, inventory, order, payment into services`
-- Pushed to `origin/main`. Working tree clean. Full reactor `mvn -B verify` green:
-  57 unit tests + 32 integration tests (Testcontainers + WireMock).
+Phase 3 was complete and pushed (`3c7f84f`). Phase 4 work is in the working
+tree, NOT yet committed. Full reactor `mvn -B verify` needs Docker (Postgres
+Testcontainers + Keycloak container); unit + Docker-free ITs verified green
+(common 8, gateway 15 incl. route-RBAC security ITs).
 
-### What Phase 3 delivered
-- Multi-module Maven reactor: `common`, `catalog-service`, `cart-service`,
-  `inventory-service`, `order-service`, `payment-service`, `checkout-service`,
-  `gateway-service` (Spring Cloud Gateway, ADR-006, no Eureka per ADR-010).
-- Database-per-service (ADR-003): each service owns a PostgreSQL database
-  (`ecommerce_<service>`), its own Flyway migrations, and its own
-  `outbox_events` table (ADR-009, publisher still Phase 5).
-- Cross-domain calls over synchronous REST (docs/03-microservice-architecture.md
-  section 3); checkout is a stateless saga orchestrator with compensation
-  (release inventory + cancel order), structured so a Phase 5 event-driven
-  version can replace the REST calls.
-- Server-authoritative pricing and Idempotency-Key semantics preserved.
-- Latent bug fixed: inventory reservation rows now transition to
-  COMMITTED/RELEASED when resolved by order (removed
-  `clearAutomatically=true` from the bulk stock UPDATEs, which had detached
-  the reservation entity).
+### What Phase 4 delivered
+- **Keycloak (ADR-005)** — realm `ecommerce` exported to
+  `infra/keycloak/ecommerce-realm.json`: realm roles `CUSTOMER`/`ADMIN`/`SERVICE`,
+  users `customer1`/`customer2`/`admin1`, clients `web-app` (SPA),
+  `test-client` (password grant for dev/tests), `service-client`
+  (client credentials, SERVICE role on its service account). 5-min access
+  tokens, refresh rotation, brute-force protection, registration disabled.
+  Dev: `docker compose up -d keycloak` (port 8087, `--import-realm`).
+- **Shared security module (`common`)** — `ServiceSecurityConfig`
+  (stateless OAuth2 resource server, Keycloak `realm_access.roles` →
+  `ROLE_*` via `KeycloakJwtAuthoritiesConverter`, JSON 401/403, configurable
+  `ecommerce.security.permit-all`, @Lazy JwtDecoder so services/tests start
+  without Keycloak); `SecurityUtils`; `ClientCredentialsTokenProvider`
+  (client-credentials SERVICE tokens, cached, `service-client.enabled` flag);
+  `RestClients.createWithServiceToken`.
+- **Gateway edge security** — reactive `SecurityWebFilterChain`:
+  public `GET /api/v1/products/**`, ADMIN product writes, CUSTOMER/ADMIN
+  cart/orders/payments/checkout, `denyAll` on `/internal/**` and unknown
+  paths, provider webhooks permit-all, OPTIONS preflight permit; token relay
+  (downstream services re-validate — defense in depth); explicit CORS
+  allowlist (`CORS_ALLOWED_ORIGINS`); stricter per-subject rate limit
+  (10/min) for checkout/payment keyed by JWT subject when authenticated.
+- **Resource servers** — catalog (public GETs, ADMIN writes, SERVICE
+  internal), inventory (SERVICE only), cart (CUSTOMER only), order
+  (ownership + CUSTOMER-or-SERVICE, ADMIN all), payment (ownership + SERVICE
+  orchestrator, ADMIN refunds, public allowlisted webhooks), checkout
+  (CUSTOMER, customerId from token, mismatch → 403).
+- **One cart per customer** — cart bound to JWT subject; `cartId` removed
+  from cart API DTOs; DB partial unique index
+  `uk_carts_active_customer` (V3 migration); a checked-out cart is replaced
+  by a fresh one on the next mutation.
+- **Trust boundary ADR-013** — endpoints shared by users and the checkout
+  orchestrator accept CUSTOMER (identity from `sub`, reject mismatch) or
+  SERVICE (trust request customerId). Internal endpoints are SERVICE-only
+  and never routed through the gateway.
+- **Object-level authorization** — customers reach only their own
+  orders/carts/payments (other users' resources 404, no existence leak);
+  payment stores denormalized `customer_id` (V3 migration).
+- **Tests** — `KeycloakJwtAuthoritiesConverterTest` (common); mocked-JWT
+  role/ownership ITs in catalog/cart/inventory/order/checkout + gateway
+  (`GatewaySecurityIT` route RBAC, all Docker-free); `GatewayKeycloakIT`
+  real-Keycloak end-to-end (issuer/JWKS validation, realm import incl.
+  service-account roles, token relay, 401/403s) — **requires Docker**.
+  NOTE: mock `jwt()` post-processors ignore `realm_access` by default — all
+  mocked-JWT helpers pass `.authorities(new KeycloakJwtAuthoritiesConverter())`.
 
-### Ports / databases
+### Ports / databases (unchanged)
 | Service | Port | DB |
 |---|---|---|
 | gateway-service | 8080 | — |
@@ -35,20 +65,23 @@ Last updated: 2026-09-16 (Phase 3 complete, committed and pushed)
 | order-service | 8084 | ecommerce_order |
 | payment-service | 8085 | ecommerce_payment |
 | checkout-service | 8086 | — (no DB) |
+| keycloak (compose) | 8087 | — |
 
 ## How to resume (fast verification)
 ```bash
 mvn -B verify                      # whole reactor, unit + ITs (needs Docker)
 mvn test                           # unit tests only
+mvn -pl gateway-service test -Dtest='!GatewayKeycloakIT'   # Docker-free gateway ITs
 ```
 
 Manual end-to-end flow (documented in README.md "Manual checkout flow"):
-1. `docker run` Postgres + create the 5 databases (README shows the SQL).
-2. `mvn -B package -DskipTests`, then `java -jar <service>/target/*.jar` per
-   service (or `mvn -pl <service> spring-boot:run`).
-3. Curl through the gateway: create product → activate → set stock → cart →
-   checkout → expect `PAID` + committed stock; a price > 10000 declines →
-   expect `CANCELLED` + released stock.
+1. `docker compose up -d keycloak`, Postgres + 5 databases (README SQL).
+2. `mvn -B package -DskipTests`, start services (Keycloak must be reachable
+   for token issuance; JWT decoders are @Lazy so startup order is flexible).
+3. Get tokens via `test-client` password grant (customer1/admin1) and
+   `service-client` client-credentials; curl through the gateway with
+   `Authorization: Bearer ...` → expect `PAID` + committed stock; a price
+   > 10000 declines → expect `CANCELLED` + released stock.
 
 ## Environment gotchas (learned the hard way — read before running)
 - **Port 5432 is taken by a local Windows PostgreSQL.** Start the Docker
@@ -66,14 +99,26 @@ Manual end-to-end flow (documented in README.md "Manual checkout flow"):
   live in `com.ecommerce.integration`, outside the service's package.
 - WireMock servers in IT bases live for the whole JVM (no `@AfterAll stop`),
   like the shared Testcontainers PostgreSQL — stopping them breaks the
-  cached Spring context on the next test class.
+  cached Spring context on the next test class. (Gateway ITs are the
+  exception: they start/stop WireMock per class, sequentially.)
+- **Mocked JWTs need the converter**: `SecurityMockMvcRequestPostProcessors.jwt()`
+  and reactive `mockJwt()` ignore `realm_access` and produce `SCOPE_*`
+  authorities by default. Always chain
+  `.authorities(new KeycloakJwtAuthoritiesConverter())`.
+- **Testcontainers dropped the keycloak module** — use
+  `com.github.dasniko:testcontainers-keycloak:3.9.1` (4.x needs
+  Testcontainers 2.x; the project is on 1.21.4). Package is
+  `dasniko.testcontainers.keycloak.KeycloakContainer`.
+- **Direct service-call tests need a SecurityContext** — `OrderService`,
+  `PaymentService` derive identity from the context; unit/IT tests that call
+  them directly set it via `com.ecommerce.integration.TestSecurity.asUser(...)`
+  (per-module copy).
 
 ## Next phases (docs/11-implementation-roadmap.md)
-- **Phase 4 — Security**: Keycloak, OAuth2/OIDC resource servers, RBAC,
-  rate limiting at the edge. Gateway is ready to attach auth filters.
 - **Phase 5 — Kafka**: event contracts, outbox publisher, consumers with
-  idempotency, DLT. The outbox tables already exist per service; the
-  checkout orchestrator is structured so the REST saga can be replaced by
-  events without changing the checkout contract.
+  idempotency, DLT. The outbox tables exist per service; the checkout
+  orchestrator is structured so the REST saga can be replaced by events
+  without changing the checkout contract (see ADR-013 boundary).
 - **Phase 6 — Resilience**: timeouts, circuit breakers, retries (the
   RestClient/Apache HC5 foundation is already in `common`).
+- **Phase 7 — Observability**: OpenTelemetry, Prometheus/Grafana.

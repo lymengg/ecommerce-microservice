@@ -1,12 +1,15 @@
 package com.ecommerce.payment.controller;
 
+import com.ecommerce.common.error.NotFoundException;
 import com.ecommerce.payment.dto.PaymentInitiateRequest;
 import com.ecommerce.payment.dto.PaymentResponse;
 import com.ecommerce.payment.dto.RefundRequest;
 import com.ecommerce.payment.dto.WebhookRequest;
+import com.ecommerce.payment.gateway.PaymentGateway;
 import com.ecommerce.payment.service.PaymentService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -41,14 +44,24 @@ public class PaymentController {
     }
 
     @PostMapping("/{paymentId}/refund")
+    @PreAuthorize("hasRole('ADMIN')")
     public PaymentResponse refund(@PathVariable UUID paymentId,
                                   @Valid @RequestBody(required = false) RefundRequest request) {
         return paymentService.refund(paymentId, request);
     }
 
+    /**
+     * Provider callback, deliberately unauthenticated at the OAuth2 layer —
+     * real providers authenticate with request signatures. Until the mock
+     * provider gains signatures, only allowlisted providers are accepted and
+     * the endpoint is rate-limited at the edge.
+     */
     @PostMapping("/webhooks/{provider}")
     public PaymentResponse webhook(@PathVariable String provider,
                                    @Valid @RequestBody WebhookRequest request) {
+        if (!PaymentGateway.PROVIDER_NAME.equals(provider)) {
+            throw new NotFoundException("Unknown payment provider: " + provider);
+        }
         return paymentService.handleWebhook(provider, request);
     }
 }

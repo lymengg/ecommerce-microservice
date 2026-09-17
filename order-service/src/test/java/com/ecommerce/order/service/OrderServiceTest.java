@@ -2,6 +2,7 @@ package com.ecommerce.order.service;
 
 import com.ecommerce.common.error.ConflictException;
 import com.ecommerce.common.outbox.OutboxService;
+import com.ecommerce.integration.TestSecurity;
 import com.ecommerce.order.client.CatalogClient;
 import com.ecommerce.order.client.CatalogProduct;
 import com.ecommerce.order.dto.CancelRequest;
@@ -50,8 +51,11 @@ class OrderServiceTest {
     private final AtomicReference<Order> savedOrder = new AtomicReference<>();
     private final AtomicReference<OrderItem> savedItem = new AtomicReference<>();
 
+    private static final UUID CUSTOMER_ID = UUID.fromString("00000000-0000-0000-0000-0000000000c1");
+
     @BeforeEach
     void setUp() {
+        TestSecurity.asUser(CUSTOMER_ID, "CUSTOMER");
         when(catalogClient.getActiveProduct(1L)).thenReturn(new CatalogProduct(1L, "SKU-1", "Widget", new BigDecimal("100.00")));
         when(catalogClient.getActiveProduct(9L)).thenThrow(new com.ecommerce.common.error.NotFoundException("Product not available: 9"));
 
@@ -120,7 +124,7 @@ class OrderServiceTest {
 
     @Test
     void markPaidAllowedFromPaymentPending() {
-        savedOrder.set(new Order(null, "USD", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
+        savedOrder.set(new Order(CUSTOMER_ID, "USD", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
         savedOrder.get().moveTo(OrderStatus.PAYMENT_PENDING);
         savedItem.set(new OrderItem(savedOrder.get().getId(), 1L, "SKU-1", "Widget", new BigDecimal("10.00"), 1, BigDecimal.ZERO, BigDecimal.ZERO, "USD"));
 
@@ -151,7 +155,7 @@ class OrderServiceTest {
 
     @Test
     void cancelRejectedFromPaid() {
-        Order paid = new Order(null, "USD", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO);
+        Order paid = new Order(CUSTOMER_ID, "USD", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO);
         paid.moveTo(OrderStatus.PAID);
         savedOrder.set(paid);
 

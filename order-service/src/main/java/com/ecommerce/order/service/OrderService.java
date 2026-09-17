@@ -3,6 +3,8 @@ package com.ecommerce.order.service;
 import com.ecommerce.common.error.ConflictException;
 import com.ecommerce.common.error.NotFoundException;
 import com.ecommerce.common.outbox.OutboxService;
+import com.ecommerce.common.security.SecurityRoles;
+import com.ecommerce.common.security.SecurityUtils;
 import com.ecommerce.order.client.CatalogClient;
 import com.ecommerce.order.client.CatalogProduct;
 import com.ecommerce.order.dto.CancelRequest;
@@ -20,6 +22,7 @@ import com.ecommerce.order.repository.OrderItemRepository;
 import com.ecommerce.order.repository.OrderRepository;
 import com.ecommerce.order.repository.OrderStatusHistoryRepository;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -78,6 +81,7 @@ public class OrderService {
             }
         }
 
+        UUID customerId = resolveCustomerId(request.customerId());
         String currency = request.currency() != null ? request.currency() : "USD";
         List<OrderItem> items = request.items().stream()
                 .map(line -> buildItem(line, currency))
@@ -92,7 +96,7 @@ public class OrderService {
         BigDecimal total = subtotal.subtract(discount).add(tax).add(shippingCost);
 
         Order order = orderRepository.save(new Order(
-                request.customerId(), currency,
+                customerId, currency,
                 money(subtotal), money(discount), money(tax), money(shippingCost), money(total)
         ));
         items.forEach(item -> item.assignTo(order.getId()));
@@ -133,8 +137,9 @@ public class OrderService {
 
     @Transactional
     public OrderResponse cancel(UUID orderId, CancelRequest request) {
+        Order order = requireAccessibleOrder(orderId);
         String reason = request != null && request.reason() != null ? request.reason() : "Order cancelled";
-        OrderResponse response = transition(orderId, OrderStatus.CANCELLED, reason);
+        OrderResponse response = transition(order, OrderStatus.CANCELLED, reason);
         outboxService.record("order", orderId.toString(), "OrderCancelled", Map.of(
                 "orderId", orderId.toString(),
                 "reason", reason
@@ -144,27 +149,83 @@ public class OrderService {
 
     @Transactional(readOnly = true)
     public OrderResponse get(UUID orderId) {
-        Order order = requireOrder(orderId);
-        return toResponse(order);
+        return toResponse(requireAccessibleOrder(orderId));
     }
 
     @Transactional(readOnly = true)
     public List<OrderResponse> list() {
-        return orderRepository.findAll().stream()
+        if (SecurityUtils.hasRole(SecurityRoles.ADMIN)) {
+            return orderRepository.findAll().stream()
+                    .map(this::toResponse)
+                    .toList();
+        }
+        if (SecurityUtils.isService()) {
+            throw new AccessDeniedException("Service callers cannot list orders");
+        }
+        return orderRepository.findByCustomerId(requireCustomer()).stream()
                 .map(this::toResponse)
                 .toList();
     }
 
     private OrderResponse transition(UUID orderId, OrderStatus to, String reason) {
-        Order order = requireOrder(orderId);
+        return transition(requireOrder(orderId), to, reason);
+    }
+
+    private OrderResponse transition(Order order, OrderStatus to, String reason) {
         Set<OrderStatus> allowed = TRANSITIONS.getOrDefault(order.getStatus(), Set.of());
         if (!allowed.contains(to)) {
-            throw new ConflictException("Cannot transition order " + orderId + " from " + order.getStatus() + " to " + to);
+            throw new ConflictException("Cannot transition order " + order.getId() + " from " + order.getStatus() + " to " + to);
         }
         OrderStatus from = order.getStatus();
         order.moveTo(to);
         historyRepository.save(new OrderStatusHistory(order.getId(), from, to, reason));
         return toResponse(order);
+    }
+
+    /**
+     * Identity of the order's customer: for user tokens the subject wins and a
+     * mismatching request-supplied id is rejected; for SERVICE callers (the
+     * checkout orchestrator) the request id is trusted because checkout has
+     * already validated the end user.
+     */
+    private UUID resolveCustomerId(UUID requestCustomerId) {
+        if (SecurityUtils.isService()) {
+            if (requestCustomerId == null) {
+                throw new AccessDeniedException("customerId is required for service-initiated orders");
+            }
+            return requestCustomerId;
+        }
+        UUID subject = requireCustomer();
+        if (requestCustomerId != null && !requestCustomerId.equals(subject)) {
+            throw new AccessDeniedException("customerId does not match the authenticated caller");
+        }
+        return subject;
+    }
+
+    /**
+     * Object-level authorization (OWASP A01): a customer may only reach their
+     * own orders; other customers' orders are indistinguishable from missing
+     * ones (404) to avoid leaking existence. SERVICE and ADMIN bypass the
+     * ownership check.
+     */
+    private Order requireAccessibleOrder(UUID orderId) {
+        Order order = requireOrder(orderId);
+        if (SecurityUtils.isService() || SecurityUtils.hasRole(SecurityRoles.ADMIN)) {
+            return order;
+        }
+        UUID subject = SecurityUtils.currentCustomerId();
+        if (subject == null || !subject.equals(order.getCustomerId())) {
+            throw new NotFoundException("Order not found: " + orderId);
+        }
+        return order;
+    }
+
+    private UUID requireCustomer() {
+        UUID customerId = SecurityUtils.currentCustomerId();
+        if (customerId == null) {
+            throw new AccessDeniedException("Customer identity required");
+        }
+        return customerId;
     }
 
     private OrderItem buildItem(OrderLineRequest line, String currency) {

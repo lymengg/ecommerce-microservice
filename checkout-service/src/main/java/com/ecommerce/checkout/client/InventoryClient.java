@@ -2,6 +2,7 @@ package com.ecommerce.checkout.client;
 
 import com.ecommerce.common.client.RemoteExceptionMapper;
 import com.ecommerce.common.client.RestClients;
+import com.ecommerce.common.security.client.ClientCredentialsTokenProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -22,8 +23,9 @@ public class InventoryClient {
 
     private final RestClient restClient;
 
-    public InventoryClient(@Value("${ecommerce.inventory.base-url}") String baseUrl) {
-        this.restClient = RestClients.create(baseUrl);
+    public InventoryClient(@Value("${ecommerce.inventory.base-url}") String baseUrl,
+                           ClientCredentialsTokenProvider tokenProvider) {
+        this.restClient = RestClients.createWithServiceToken(baseUrl, tokenProvider::getToken);
     }
 
     public ReservationInfo reserve(Long productId, int quantity, UUID orderId) {

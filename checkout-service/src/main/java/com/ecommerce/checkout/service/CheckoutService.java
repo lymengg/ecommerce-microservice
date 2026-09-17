@@ -43,10 +43,10 @@ public class CheckoutService {
         this.paymentClient = paymentClient;
     }
 
-    public CheckoutResponse checkout(CheckoutRequest request, String idempotencyKey) {
+    public CheckoutResponse checkout(CheckoutRequest request, UUID customerId, String idempotencyKey) {
         List<CartLineInfo> lines = cartClient.getLines(request.cartId());
         OrderCreateRequest orderRequest = new OrderCreateRequest(
-                request.customerId(),
+                customerId,
                 request.currency(),
                 lines.stream().map(line -> new OrderCreateRequest.OrderLineRequest(line.productId(), line.quantity())).toList()
         );

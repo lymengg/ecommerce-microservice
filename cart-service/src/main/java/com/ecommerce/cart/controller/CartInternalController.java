@@ -3,6 +3,7 @@ package com.ecommerce.cart.controller;
 import com.ecommerce.cart.dto.CartLine;
 import com.ecommerce.cart.service.CartService;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -20,6 +21,7 @@ import java.util.UUID;
  */
 @RestController
 @RequestMapping("/internal/api/v1/cart")
+@PreAuthorize("hasRole('SERVICE')")
 public class CartInternalController {
 
     private final CartService cartService;

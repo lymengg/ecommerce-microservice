@@ -41,6 +41,7 @@ class CheckoutServiceTest {
     private final UUID cartId = UUID.randomUUID();
     private final UUID orderId = UUID.randomUUID();
     private final UUID paymentId = UUID.randomUUID();
+    private final UUID customerId = UUID.randomUUID();
 
     @BeforeEach
     void setUp() {
@@ -62,7 +63,7 @@ class CheckoutServiceTest {
 
     @Test
     void checkoutMarksOrderPaidOnSuccess() {
-        CheckoutResponse response = checkoutService.checkout(new CheckoutRequest(cartId, null, null), null);
+        CheckoutResponse response = checkoutService.checkout(new CheckoutRequest(cartId, null, null), customerId, null);
 
         assertThat(response.orderId()).isEqualTo(orderId);
         assertThat(response.orderStatus()).isEqualTo("PAID");
@@ -78,7 +79,7 @@ class CheckoutServiceTest {
                 paymentId, orderId, "FAILED", new BigDecimal("22.00"), "USD", Instant.now()
         ));
 
-        assertThatThrownBy(() -> checkoutService.checkout(new CheckoutRequest(cartId, null, null), null))
+        assertThatThrownBy(() -> checkoutService.checkout(new CheckoutRequest(cartId, null, null), customerId, null))
                 .isInstanceOf(ConflictException.class)
                 .hasMessageContaining("payment declined");
 
@@ -92,7 +93,7 @@ class CheckoutServiceTest {
         doThrow(new InsufficientStockException("Insufficient stock for product 1"))
                 .when(inventoryClient).reserve(1L, 2, orderId);
 
-        assertThatThrownBy(() -> checkoutService.checkout(new CheckoutRequest(cartId, null, null), null))
+        assertThatThrownBy(() -> checkoutService.checkout(new CheckoutRequest(cartId, null, null), customerId, null))
                 .isInstanceOf(InsufficientStockException.class);
 
         verify(inventoryClient).releaseByOrder(orderId);
@@ -104,7 +105,7 @@ class CheckoutServiceTest {
     void checkoutReusesExistingOrderOnIdempotentRetry() {
         when(orderClient.createOrder(any(), any())).thenReturn(orderInfo("PAID"));
 
-        CheckoutResponse response = checkoutService.checkout(new CheckoutRequest(cartId, null, null), "retry-key");
+        CheckoutResponse response = checkoutService.checkout(new CheckoutRequest(cartId, null, null), customerId, "retry-key");
 
         assertThat(response.orderId()).isEqualTo(orderId);
         assertThat(response.orderStatus()).isEqualTo("PAID");

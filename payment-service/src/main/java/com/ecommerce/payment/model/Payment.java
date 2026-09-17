@@ -24,6 +24,10 @@ public class Payment {
     @Column(name = "order_id", nullable = false, unique = true)
     private UUID orderId;
 
+    /** Customer the order belongs to, denormalized at initiation for read-side ownership checks. */
+    @Column(name = "customer_id")
+    private UUID customerId;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 25)
     private PaymentStatus status = PaymentStatus.PENDING;
@@ -54,8 +58,13 @@ public class Payment {
     }
 
     public Payment(UUID orderId, BigDecimal amount, String currency, String idempotencyKey) {
+        this(orderId, null, amount, currency, idempotencyKey);
+    }
+
+    public Payment(UUID orderId, UUID customerId, BigDecimal amount, String currency, String idempotencyKey) {
         this();
         this.orderId = orderId;
+        this.customerId = customerId;
         this.amount = amount;
         this.currency = currency;
         this.idempotencyKey = idempotencyKey;
@@ -72,6 +81,10 @@ public class Payment {
 
     public UUID getOrderId() {
         return orderId;
+    }
+
+    public UUID getCustomerId() {
+        return customerId;
     }
 
     public PaymentStatus getStatus() {

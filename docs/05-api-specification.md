@@ -36,6 +36,10 @@ POST   /api/v1/products/{productId}/archive
 ```
 
 ## 4. Cart
+The cart belongs to the authenticated customer (JWT `sub`); clients do not
+send a cart id — the server resolves the customer's single active cart.
+A checked-out cart is replaced by a fresh one on the next mutation.
+
 ```text
 GET    /api/v1/cart
 POST   /api/v1/cart/items
@@ -99,8 +103,22 @@ Breaking changes require a new version or migration strategy.
 
 ## 12. Security
 - Validate all input.
-- Authenticate protected endpoints.
-- Authorize every protected object.
-- Rate limit sensitive operations.
+- Authenticate protected endpoints with OAuth2 bearer tokens (Keycloak,
+  ADR-005). Clients present `Authorization: Bearer <access-token>`; services
+  validate issuer, signature (JWKS) and expiry.
+- Authorize every protected object in the owning service (OWASP A01): a
+  customer only reaches their own orders/carts/payments; other users'
+  resources are indistinguishable from missing ones (404).
+- Roles (Keycloak realm roles -> `ROLE_*` authorities): `CUSTOMER` (own
+  resources), `ADMIN` (product/inventory writes, refunds, all orders),
+  `SERVICE` (client-credentials tokens for service-to-service calls;
+  `/internal/**` endpoints accept SERVICE only and are never routed through
+  the gateway).
+- Identity is derived from the token: a client-supplied `customerId` that
+  does not match the JWT `sub` is rejected (403). SERVICE callers (the
+  checkout orchestrator) may act on behalf of a customer id (ADR-013).
+- Rate limit sensitive operations (edge: per-IP fixed window + stricter
+  per-subject limits for checkout/payment).
 - Avoid sensitive data in URLs.
 - Do not return tokens or secrets in normal API responses.
+- Never log tokens, credentials or payment details.

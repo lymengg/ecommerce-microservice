@@ -2,6 +2,7 @@ package com.ecommerce.checkout.client;
 
 import com.ecommerce.common.client.RemoteExceptionMapper;
 import com.ecommerce.common.client.RestClients;
+import com.ecommerce.common.security.client.ClientCredentialsTokenProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -20,8 +21,9 @@ public class PaymentClient {
 
     private final RestClient restClient;
 
-    public PaymentClient(@Value("${ecommerce.payment.base-url}") String baseUrl) {
-        this.restClient = RestClients.create(baseUrl);
+    public PaymentClient(@Value("${ecommerce.payment.base-url}") String baseUrl,
+                         ClientCredentialsTokenProvider tokenProvider) {
+        this.restClient = RestClients.createWithServiceToken(baseUrl, tokenProvider::getToken);
     }
 
     public PaymentInfo initiate(UUID orderId, String idempotencyKey) {

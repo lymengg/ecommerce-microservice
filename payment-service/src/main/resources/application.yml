@@ -11,6 +11,11 @@ spring:
     open-in-view: false
   flyway:
     enabled: true
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${KEYCLOAK_ISSUER_URI:http://localhost:8087/realms/ecommerce}
 
 springdoc:
   swagger-ui:
@@ -24,3 +29,14 @@ ecommerce:
     decline-above: ${DECLINE_ABOVE:10000}
   order:
     base-url: ${ORDER_SERVICE_URL:http://localhost:8084}
+  security:
+    # Provider webhook callbacks carry signatures, not OAuth2 tokens (mock
+    # provider: none yet). The endpoint is rate-limited at the edge and the
+    # provider is allowlisted in PaymentController.
+    permit-all:
+      - "POST:/api/v1/payments/webhooks/**"
+    service-client:
+      enabled: true
+      token-uri: ${KEYCLOAK_TOKEN_URI:http://localhost:8087/realms/ecommerce/protocol/openid-connect/token}
+      client-id: ${SERVICE_CLIENT_ID:service-client}
+      client-secret: ${SERVICE_CLIENT_SECRET:dev-service-client-secret}

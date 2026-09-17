@@ -2,6 +2,7 @@ package com.ecommerce.order.controller;
 
 import com.ecommerce.order.dto.OrderResponse;
 import com.ecommerce.order.service.OrderService;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -11,10 +12,11 @@ import java.util.UUID;
 
 /**
  * Internal service-to-service endpoints used by the checkout orchestrator to
- * advance the order state machine as the saga progresses.
+ * advance the order state machine as the saga progresses. SERVICE tokens only.
  */
 @RestController
 @RequestMapping("/internal/api/v1/orders")
+@PreAuthorize("hasRole('SERVICE')")
 public class OrderInternalController {
 
     private final OrderService orderService;

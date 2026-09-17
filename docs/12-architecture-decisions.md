@@ -59,3 +59,24 @@
 **Decision:** Do not introduce a dedicated search engine until product requirements justify it.
 
 **Reason:** Avoid infrastructure complexity before search scale/features require it.
+
+## ADR-013: CUSTOMER-or-SERVICE Trust Boundary
+**Decision:** Endpoints used both by end users and by the checkout orchestrator
+(`POST /api/v1/orders`, `POST /api/v1/orders/{id}/cancel`, `POST /api/v1/payments`)
+accept either a user token or a service token:
+
+- **CUSTOMER / ADMIN principal** — identity is derived from the JWT `sub`
+  claim; a client-supplied `customerId` that does not match the subject is
+  rejected (403). Object-level authorization is enforced in the owning service.
+- **SERVICE principal** (client credentials) — the request-supplied
+  `customerId` is trusted because the orchestrator already validated the end
+  user's token before starting the saga.
+
+**Reason:** The checkout saga must act on behalf of a user without holding the
+user's token. Routing the orchestrator's calls through user impersonation
+would require token exchange and weaken auditability; trusting the
+orchestrator keeps the trust boundary small and explicit. Phase 5 replaces
+these synchronous calls with events, at which point the same boundary applies
+to the producer of the event stream.
+
+**Status:** Accepted, Phase 4.

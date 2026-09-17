@@ -1,0 +1,27 @@
+# Local development infrastructure.
+#
+# Postgres is intentionally NOT here: the existing manual flow (README.md)
+# runs it with `docker run` on host port 5433 because port 5432 is often taken
+# by a local Windows PostgreSQL. Phase 8 will fold everything into a full
+# local environment.
+#
+# Usage:
+#   docker compose up -d keycloak
+#   # then start services with KEYCLOAK_ISSUER_URI=http://localhost:8087/realms/ecommerce
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.4
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8087:8080"
+    volumes:
+      - ./infra/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080; echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; cat <&3 | grep -q '200 OK'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s

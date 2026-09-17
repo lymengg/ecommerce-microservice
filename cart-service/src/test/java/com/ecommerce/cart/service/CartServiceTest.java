@@ -24,6 +24,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -34,22 +35,36 @@ class CartServiceTest {
     private final CatalogClient catalogClient = mock(CatalogClient.class);
     private final CartService cartService = new CartService(cartRepository, cartItemRepository, catalogClient);
 
+    private final UUID customerId = UUID.randomUUID();
     private Cart cart;
 
     @BeforeEach
     void setUp() {
-        cart = new Cart();
+        cart = new Cart(customerId);
+        when(cartRepository.findByCustomerIdAndStatus(customerId, CartStatus.ACTIVE)).thenReturn(Optional.of(cart));
         when(cartRepository.findById(cart.getId())).thenReturn(Optional.of(cart));
+        when(cartRepository.save(any(Cart.class))).thenAnswer(invocation -> invocation.getArgument(0));
         when(catalogClient.getActiveProduct(1L)).thenReturn(new CatalogProduct(1L, "SKU-1", "Widget", new BigDecimal("10.00")));
     }
 
     @Test
-    void getOrCreateWithoutIdCreatesCart() {
-        CartResponse response = cartService.getOrCreate(null);
+    void getOrCreateCreatesCartWhenNoneExists() {
+        when(cartRepository.findByCustomerIdAndStatus(customerId, CartStatus.ACTIVE)).thenReturn(Optional.empty());
+
+        CartResponse response = cartService.getOrCreate(customerId);
 
         assertThat(response.cartId()).isNotNull();
+        assertThat(response.customerId()).isEqualTo(customerId);
         assertThat(response.status()).isEqualTo(CartStatus.ACTIVE.name());
         verify(cartRepository).save(any(Cart.class));
+    }
+
+    @Test
+    void getOrCreateReturnsExistingActiveCart() {
+        CartResponse response = cartService.getOrCreate(customerId);
+
+        assertThat(response.cartId()).isEqualTo(cart.getId());
+        verify(cartRepository, never()).save(any(Cart.class));
     }
 
     @Test
@@ -58,7 +73,7 @@ class CartServiceTest {
         when(cartItemRepository.findByCartId(cart.getId())).thenReturn(
                 List.of(new CartItem(cart.getId(), 1L, "SKU-1", 2)));
 
-        CartResponse response = cartService.addItem(new CartItemRequest(cart.getId(), 1L, 2));
+        CartResponse response = cartService.addItem(customerId, new CartItemRequest(1L, 2));
 
         assertThat(response.items()).hasSize(1);
         assertThat(response.items().get(0).quantity()).isEqualTo(2);
@@ -71,7 +86,7 @@ class CartServiceTest {
         when(cartItemRepository.findByCartIdAndProductId(cart.getId(), 1L)).thenReturn(Optional.of(existing));
         when(cartItemRepository.findByCartId(cart.getId())).thenReturn(List.of(existing));
 
-        cartService.addItem(new CartItemRequest(cart.getId(), 1L, 3));
+        cartService.addItem(customerId, new CartItemRequest(1L, 3));
 
         assertThat(existing.getQuantity()).isEqualTo(5);
     }
@@ -81,16 +96,20 @@ class CartServiceTest {
         CartItem existing = new CartItem(cart.getId(), 1L, "SKU-1", 98);
         when(cartItemRepository.findByCartIdAndProductId(cart.getId(), 1L)).thenReturn(Optional.of(existing));
 
-        assertThatThrownBy(() -> cartService.addItem(new CartItemRequest(cart.getId(), 1L, 3)))
+        assertThatThrownBy(() -> cartService.addItem(customerId, new CartItemRequest(1L, 3)))
                 .isInstanceOf(ConflictException.class);
     }
 
     @Test
-    void addItemRejectsCheckedOutCart() {
+    void addItemAfterCheckoutStartsFreshCart() {
         cart.checkOut();
+        when(cartRepository.findByCustomerIdAndStatus(customerId, CartStatus.ACTIVE)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> cartService.addItem(new CartItemRequest(cart.getId(), 1L, 1)))
-                .isInstanceOf(ConflictException.class);
+        CartResponse response = cartService.addItem(customerId, new CartItemRequest(1L, 1));
+
+        assertThat(response.cartId()).isNotEqualTo(cart.getId());
+        assertThat(response.status()).isEqualTo(CartStatus.ACTIVE.name());
+        verify(cartRepository).save(any(Cart.class));
     }
 
     @Test
@@ -98,7 +117,7 @@ class CartServiceTest {
         CartItem item = new CartItem(cart.getId(), 1L, "SKU-1", 2);
         when(cartItemRepository.findByIdAndCartId(item.getId(), cart.getId())).thenReturn(Optional.of(item));
 
-        cartService.updateQuantity(cart.getId(), item.getId(), new CartItemUpdateRequest(cart.getId(), 7));
+        cartService.updateQuantity(customerId, item.getId(), new CartItemUpdateRequest(7));
 
         assertThat(item.getQuantity()).isEqualTo(7);
     }
@@ -107,7 +126,7 @@ class CartServiceTest {
     void updateQuantityRejectsItemFromOtherCart() {
         when(cartItemRepository.findByIdAndCartId(UUID.randomUUID(), cart.getId())).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> cartService.updateQuantity(cart.getId(), UUID.randomUUID(), new CartItemUpdateRequest(cart.getId(), 1)))
+        assertThatThrownBy(() -> cartService.updateQuantity(customerId, UUID.randomUUID(), new CartItemUpdateRequest(1)))
                 .isInstanceOf(NotFoundException.class);
     }
 
@@ -117,7 +136,7 @@ class CartServiceTest {
         when(cartItemRepository.findByIdAndCartId(item.getId(), cart.getId())).thenReturn(Optional.of(item));
         when(cartItemRepository.findByCartId(cart.getId())).thenReturn(List.of());
 
-        CartResponse response = cartService.removeItem(cart.getId(), item.getId());
+        CartResponse response = cartService.removeItem(customerId, item.getId());
 
         assertThat(response.items()).isEmpty();
         verify(cartItemRepository).delete(item);
@@ -143,7 +162,7 @@ class CartServiceTest {
     void inactiveProductCannotBeAdded() {
         when(catalogClient.getActiveProduct(9L)).thenThrow(new NotFoundException("Product not available: 9"));
 
-        assertThatThrownBy(() -> cartService.addItem(new CartItemRequest(cart.getId(), 9L, 1)))
+        assertThatThrownBy(() -> cartService.addItem(customerId, new CartItemRequest(9L, 1)))
                 .isInstanceOf(NotFoundException.class);
     }
 }

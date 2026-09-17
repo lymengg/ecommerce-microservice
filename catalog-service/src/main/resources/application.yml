@@ -11,6 +11,16 @@ spring:
     open-in-view: false
   flyway:
     enabled: true
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${KEYCLOAK_ISSUER_URI:http://localhost:8087/realms/ecommerce}
+
+ecommerce:
+  security:
+    permit-all:
+      - "GET:/api/v1/products/**"
 
 springdoc:
   swagger-ui:

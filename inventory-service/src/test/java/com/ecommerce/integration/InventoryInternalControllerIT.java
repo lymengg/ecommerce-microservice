@@ -1,5 +1,6 @@
 package com.ecommerce.integration;
 
+import com.ecommerce.common.security.KeycloakJwtAuthoritiesConverter;
 import com.ecommerce.inventory.dto.ReservationRequest;
 import com.ecommerce.inventory.dto.StockRequest;
 import com.ecommerce.inventory.model.ReservationStatus;
@@ -12,9 +13,12 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -44,6 +48,7 @@ class InventoryInternalControllerIT extends AbstractIntegrationTest {
         inventoryService.reserve(new ReservationRequest(1L, 3, orderId));
 
         mockMvc.perform(post("/internal/api/v1/inventory/reservations/commit-by-order")
+                        .with(serviceToken())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(new OrderActionRequest(orderId))))
                 .andExpect(status().isNoContent());
@@ -60,6 +65,7 @@ class InventoryInternalControllerIT extends AbstractIntegrationTest {
         inventoryService.reserve(new ReservationRequest(2L, 2, orderId));
 
         mockMvc.perform(post("/internal/api/v1/inventory/reservations/release-by-order")
+                        .with(serviceToken())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(new OrderActionRequest(orderId))))
                 .andExpect(status().isNoContent());
@@ -72,9 +78,25 @@ class InventoryInternalControllerIT extends AbstractIntegrationTest {
     @Test
     void missingOrderIdIsRejected() throws Exception {
         mockMvc.perform(post("/internal/api/v1/inventory/reservations/commit-by-order")
+                        .with(serviceToken())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}"))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void rejectsCustomerTokens() throws Exception {
+        mockMvc.perform(post("/internal/api/v1/inventory/reservations/commit-by-order")
+                        .with(jwt().jwt(j -> j.claim("realm_access", Map.of("roles", List.of("CUSTOMER"))))
+                                .authorities(new KeycloakJwtAuthoritiesConverter()))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(new OrderActionRequest(UUID.randomUUID()))))
+                .andExpect(status().isForbidden());
+    }
+
+    private static org.springframework.test.web.servlet.request.RequestPostProcessor serviceToken() {
+        return jwt().jwt(j -> j.claim("realm_access", Map.of("roles", List.of("SERVICE"))))
+                .authorities(new KeycloakJwtAuthoritiesConverter());
     }
 
     private record OrderActionRequest(UUID orderId) {

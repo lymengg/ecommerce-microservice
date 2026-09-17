@@ -4,6 +4,12 @@ server:
 spring:
   application:
     name: gateway-service
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Keycloak realm metadata endpoint; JWKS are resolved from it.
+          issuer-uri: ${KEYCLOAK_ISSUER_URI:http://localhost:8087/realms/ecommerce}
   cloud:
     gateway:
       server:
@@ -29,6 +35,16 @@ spring:
               uri: ${CHECKOUT_SERVICE_URL:http://localhost:8086}
               predicates:
                 - Path=/api/v1/checkout/**
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            # Explicit allowlist only — never wildcard for authenticated APIs.
+            allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
+            allowed-methods: [GET, POST, PATCH, DELETE, OPTIONS]
+            allowed-headers: [Authorization, Content-Type, Idempotency-Key]
+            exposed-headers: [Idempotency-Key]
+            allow-credentials: false
+            max-age: 3600
 
 ecommerce:
   gateway:
@@ -37,3 +53,7 @@ ecommerce:
       # coarse-grained fixed-window limit per client IP; Redis-backed limiting
       # arrives with the Phase 8 infrastructure
       max-requests-per-minute: ${RATE_LIMIT_MAX_REQUESTS_PER_MINUTE:100}
+      # stricter limit for sensitive business flows (checkout, payment
+      # initiation), keyed by the authenticated subject when available
+      strict:
+        max-requests-per-minute: ${STRICT_RATE_LIMIT_MAX_REQUESTS_PER_MINUTE:10}

@@ -2,6 +2,7 @@ package com.ecommerce.payment.service;
 
 import com.ecommerce.common.error.ConflictException;
 import com.ecommerce.common.outbox.OutboxService;
+import com.ecommerce.integration.TestSecurity;
 import com.ecommerce.payment.client.OrderClient;
 import com.ecommerce.payment.client.OrderInfo;
 import com.ecommerce.payment.dto.PaymentInitiateRequest;
@@ -56,12 +57,14 @@ class PaymentServiceTest {
             webhookEventRepository, orderClient, paymentGateway, outboxService);
 
     private final UUID orderId = UUID.randomUUID();
+    private static final UUID CUSTOMER_ID = UUID.fromString("00000000-0000-0000-0000-0000000000f1");
     private final AtomicReference<Payment> savedPayment = new AtomicReference<>();
 
     @BeforeEach
     void setUp() {
+        TestSecurity.asUser(CUSTOMER_ID, "CUSTOMER");
         when(orderClient.getOrder(orderId)).thenReturn(new OrderInfo(
-                orderId, null, "PENDING", "USD",
+                orderId, CUSTOMER_ID, "PENDING", "USD",
                 new BigDecimal("100.00"), BigDecimal.ZERO, new BigDecimal("10.00"), BigDecimal.ZERO,
                 new BigDecimal("110.00"), Instant.now(), List.of()
         ));
@@ -116,7 +119,7 @@ class PaymentServiceTest {
     @Test
     void initiateRejectsCancelledOrder() {
         when(orderClient.getOrder(orderId)).thenReturn(new OrderInfo(
-                orderId, null, "CANCELLED", "USD", BigDecimal.ZERO, BigDecimal.ZERO,
+                orderId, CUSTOMER_ID, "CANCELLED", "USD", BigDecimal.ZERO, BigDecimal.ZERO,
                 BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, Instant.now(), List.of()
         ));
 

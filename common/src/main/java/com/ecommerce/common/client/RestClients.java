@@ -3,6 +3,8 @@ package com.ecommerce.common.client;
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
+import java.util.function.Supplier;
+
 /**
  * Builds the RestClient used by service-to-service clients. Uses Apache
  * HttpClient 5 (rather than the JDK client) because its connection manager
@@ -17,9 +19,25 @@ public final class RestClients {
     }
 
     public static RestClient create(String baseUrl) {
+        return builder(baseUrl).build();
+    }
+
+    /**
+     * Creates a client that attaches a service-to-service bearer token
+     * (client credentials, SERVICE role) to every request.
+     */
+    public static RestClient createWithServiceToken(String baseUrl, Supplier<String> bearerToken) {
+        return builder(baseUrl)
+                .requestInterceptor((request, body, execution) -> {
+                    request.getHeaders().setBearerAuth(bearerToken.get());
+                    return execution.execute(request, body);
+                })
+                .build();
+    }
+
+    private static RestClient.Builder builder(String baseUrl) {
         return RestClient.builder()
                 .baseUrl(baseUrl)
-                .requestFactory(new HttpComponentsClientHttpRequestFactory())
-                .build();
+                .requestFactory(new HttpComponentsClientHttpRequestFactory());
     }
 }

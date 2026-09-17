@@ -2,6 +2,7 @@ package com.ecommerce.checkout.client;
 
 import com.ecommerce.common.client.RemoteExceptionMapper;
 import com.ecommerce.common.client.RestClients;
+import com.ecommerce.common.security.client.ClientCredentialsTokenProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -21,8 +22,9 @@ public class OrderClient {
 
     private final RestClient restClient;
 
-    public OrderClient(@Value("${ecommerce.order.base-url}") String baseUrl) {
-        this.restClient = RestClients.create(baseUrl);
+    public OrderClient(@Value("${ecommerce.order.base-url}") String baseUrl,
+                       ClientCredentialsTokenProvider tokenProvider) {
+        this.restClient = RestClients.createWithServiceToken(baseUrl, tokenProvider::getToken);
     }
 
     public OrderInfo createOrder(OrderCreateRequest request, String idempotencyKey) {

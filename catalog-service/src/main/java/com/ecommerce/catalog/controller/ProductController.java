@@ -6,6 +6,7 @@ import com.ecommerce.catalog.dto.ProductUpdateRequest;
 import com.ecommerce.catalog.service.ProductService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -27,12 +28,7 @@ public class ProductController {
         this.productService = productService;
     }
 
-    @PostMapping
-    @ResponseStatus(HttpStatus.CREATED)
-    public ProductResponse create(@Valid @RequestBody ProductRequest request) {
-        return productService.create(request);
-    }
-
+    /** Public browsing is permit-all at the filter chain; only writes are ADMIN. */
     @GetMapping("/{id}")
     public ProductResponse get(@PathVariable Long id) {
         return productService.get(id);
@@ -43,17 +39,27 @@ public class ProductController {
         return productService.list();
     }
 
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    @PreAuthorize("hasRole('ADMIN')")
+    public ProductResponse create(@Valid @RequestBody ProductRequest request) {
+        return productService.create(request);
+    }
+
     @PatchMapping("/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
     public ProductResponse update(@PathVariable Long id, @Valid @RequestBody ProductUpdateRequest request) {
         return productService.update(id, request);
     }
 
     @PostMapping("/{id}/activate")
+    @PreAuthorize("hasRole('ADMIN')")
     public ProductResponse activate(@PathVariable Long id) {
         return productService.activate(id);
     }
 
     @PostMapping("/{id}/archive")
+    @PreAuthorize("hasRole('ADMIN')")
     public ProductResponse archive(@PathVariable Long id) {
         return productService.archive(id);
     }

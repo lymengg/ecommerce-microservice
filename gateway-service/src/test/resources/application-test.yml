@@ -1,4 +1,11 @@
 spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # no issuer-uri: the JwtDecoder is @Lazy and only created when a
+          # real bearer token needs validating; tests use mocked JWTs or
+          # override this property (GatewayKeycloakIT)
   cloud:
     gateway:
       server:
@@ -8,6 +15,22 @@ spring:
               uri: http://localhost:18080
               predicates:
                 - Path=/api/v1/products/**
+            - id: cart-service
+              uri: http://localhost:18080
+              predicates:
+                - Path=/api/v1/cart/**
+            - id: order-service
+              uri: http://localhost:18080
+              predicates:
+                - Path=/api/v1/orders/**
+            - id: payment-service
+              uri: http://localhost:18080
+              predicates:
+                - Path=/api/v1/payments/**
+            - id: checkout-service
+              uri: http://localhost:18080
+              predicates:
+                - Path=/api/v1/checkout/**
 
 ecommerce:
   gateway:

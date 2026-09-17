@@ -30,15 +30,29 @@ Extract:
 
 Introduce database-per-service.
 
-## Phase 4 — Security
-- Keycloak
-- OAuth2/OIDC
-- Resource server validation
-- RBAC
-- Object-level authorization
-- Rate limiting
-- CORS/CSRF strategy
-- Security testing
+## Phase 4 — Security ✅ (2026-09-17)
+- Keycloak — realm `ecommerce` (roles CUSTOMER/ADMIN/SERVICE, 5-min access
+  tokens, refresh rotation, brute-force protection); dev via
+  `docker compose up -d keycloak`, tests via a Keycloak container
+- OAuth2/OIDC — every service is an OAuth2 resource server (ADR-005);
+  gateway validates JWTs at the edge and relays them (defense in depth)
+- Resource server validation — issuer-uri/JWKS, lazy decoders, Keycloak
+  `realm_access.roles` -> `ROLE_*` authorities
+- RBAC — gateway route rules (public product GETs, ADMIN writes, CUSTOMER
+  cart/orders/payments/checkout); method security in services; SERVICE role
+  for internal endpoints
+- Object-level authorization — customer sees only own orders/carts/payments
+  (404 for others); cart bound to JWT subject (one active cart per customer);
+  client-supplied customerId rejected on mismatch (ADR-013)
+- Rate limiting — per-IP fixed window at the edge + stricter per-subject
+  limit for checkout/payment
+- CORS/CSRF strategy — explicit origin allowlist; bearer-token APIs are
+  stateless (CSRF not applicable, documented); webhooks permit-all + provider
+  allowlist
+- Security testing — unit tests for claim mapping; mocked-JWT role/ownership
+  ITs in every service + gateway; real-Keycloak end-to-end IT
+  (`GatewayKeycloakIT`); security defaults: no secrets committed, restricted
+  actuator exposure planned with Phase 9
 
 ## Phase 5 — Kafka
 - Event contracts

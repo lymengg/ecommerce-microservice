@@ -13,6 +13,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import java.util.List;
 import java.util.UUID;
 
+import static com.ecommerce.integration.TestSecurity.asUser;
+
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlMatching;
@@ -21,9 +23,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 class OrderServiceIT extends AbstractIntegrationTest {
 
     private static final long PRODUCT_ID = 1L;
+    private static final UUID CUSTOMER_ID = UUID.fromString("00000000-0000-0000-0000-0000000000d1");
 
     @Autowired
     private OrderService orderService;
+
+    @BeforeEach
+    void authenticateCustomer() {
+        asUser(CUSTOMER_ID, "CUSTOMER");
+    }
 
     @Autowired
     private OutboxRepository outboxRepository;
@@ -64,7 +72,7 @@ class OrderServiceIT extends AbstractIntegrationTest {
     @Test
     void cancelFromDraftPersistsStateAndHistory() {
         OrderResponse order = orderService.create(
-                new OrderCreateRequest(UUID.randomUUID(), null, List.of(new OrderLineRequest(PRODUCT_ID, 1))),
+                new OrderCreateRequest(CUSTOMER_ID, null, List.of(new OrderLineRequest(PRODUCT_ID, 1))),
                 null
         );
 

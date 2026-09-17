@@ -1,6 +1,11 @@
 spring:
   application:
     name: checkout-service
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${KEYCLOAK_ISSUER_URI:http://localhost:8087/realms/ecommerce}
 
 springdoc:
   swagger-ui:
@@ -18,3 +23,9 @@ ecommerce:
     base-url: ${INVENTORY_SERVICE_URL:http://localhost:8083}
   payment:
     base-url: ${PAYMENT_SERVICE_URL:http://localhost:8085}
+  security:
+    service-client:
+      enabled: true
+      token-uri: ${KEYCLOAK_TOKEN_URI:http://localhost:8087/realms/ecommerce/protocol/openid-connect/token}
+      client-id: ${SERVICE_CLIENT_ID:service-client}
+      client-secret: ${SERVICE_CLIENT_SECRET:dev-service-client-secret}
