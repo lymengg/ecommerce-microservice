@@ -1,13 +1,15 @@
 # Project Progress — session handoff
 
-Last updated: 2026-09-17 (Phase 4 security complete)
+Last updated: 2026-09-17 (Phase 4 security complete + fully verified)
 
-## Status: Phase 4 (Security) — DONE (uncommitted)
+## Status: Phase 4 (Security) — DONE, `mvn -B verify` GREEN
 
-Phase 3 was complete and pushed (`3c7f84f`). Phase 4 work is in the working
-tree, NOT yet committed. Full reactor `mvn -B verify` needs Docker (Postgres
-Testcontainers + Keycloak container); unit + Docker-free ITs verified green
-(common 8, gateway 15 incl. route-RBAC security ITs).
+- `4dc3814` — feat: secure the platform with Keycloak/OAuth2, RBAC and
+  ownership (Phase 4)
+- `980569a` — fix: harden Phase 4 verification findings
+- Full reactor `mvn -B verify` green with Docker: 113 tests (57 unit + 56
+  integration incl. Testcontainers PostgreSQL + a real Keycloak container).
+  Branch is ahead of origin/main by 3 commits, NOT pushed.
 
 ### What Phase 4 delivered
 - **Keycloak (ADR-005)** — realm `ecommerce` exported to
@@ -106,7 +108,9 @@ Manual end-to-end flow (documented in README.md "Manual checkout flow"):
 - **Mocked JWTs need the converter**: `SecurityMockMvcRequestPostProcessors.jwt()`
   and reactive `mockJwt()` ignore `realm_access` and produce `SCOPE_*`
   authorities by default. Always chain
-  `.authorities(new KeycloakJwtAuthoritiesConverter())`.
+  `.authorities(new KeycloakJwtAuthoritiesConverter())`. Mock `jwt()` also
+  defaults the subject to `"user"` — set a UUID subject wherever the service
+  parses `sub` as a customer id.
 - **Testcontainers dropped the keycloak module** — use
   `com.github.dasniko:testcontainers-keycloak:3.9.1` (4.x needs
   Testcontainers 2.x; the project is on 1.21.4). Package is
@@ -115,6 +119,32 @@ Manual end-to-end flow (documented in README.md "Manual checkout flow"):
   `PaymentService` derive identity from the context; unit/IT tests that call
   them directly set it via `com.ecommerce.integration.TestSecurity.asUser(...)`
   (per-module copy).
+- **@Lazy does not defer servlet JwtDecoder creation** — the servlet
+  `WebSecurityConfiguration` instantiates it at startup, and
+  `NimbusJwtDecoder.withIssuerLocation(...).build()` does OIDC discovery
+  eagerly (network at startup). Use the `LazyIssuerJwtDecoder` /
+  `LazyIssuerReactiveJwtDecoder` wrappers (discovery on first token
+  validation, no I/O at construction).
+- **@PreAuthorize denials must not hit the generic @ExceptionHandler** —
+  `GlobalExceptionHandler` rethrows `AccessDeniedException` so Spring
+  Security's filter maps it to the JSON 403; otherwise it becomes a 500.
+- **Services with S2S calls need a token endpoint in ITs** — the IT bases
+  (cart/order/payment/checkout) stub POST /token on WireMock and override
+  `ecommerce.security.service-client.token-uri` to it (no Keycloak needed
+  for service ITs).
+- **checkout-service scans selectively** — `CheckoutServiceApplication` scans
+  `com.ecommerce.checkout` + `common.error` + `common.security` (NOT the
+  whole `com.ecommerce`, to avoid the JPA/outbox beans). If new shared
+  components are added to `common`, check whether checkout needs them in the
+  scan.
+- **Gateway ITs use the test profile** — `GatewayKeycloakIT` needs
+  `@ActiveProfiles("test")` so routes point at WireMock 18080; without it the
+  main `application.yml` routes to the real service ports (8081-8086) and
+  every routed request 500s.
+- **Realm JSON must match Keycloak 26 fields** — `refreshTokenLifespan` /
+  `refreshTokenMaxReuse` are rejected by the importer in 26.7 (rotation is
+  the default); `serviceAccountClientId` users with `realmRoles` import
+  correctly (verified by `GatewayKeycloakIT.realmImportCreatesUsersAndRoles`).
 
 ## Next phases (docs/11-implementation-roadmap.md)
 - **Phase 5 — Kafka**: event contracts, outbox publisher, consumers with
