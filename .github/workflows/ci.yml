@@ -21,7 +21,7 @@ jobs:
           cache: maven
 
       - name: Unit tests
-        run: mvn -B --no-transfer-progress test
+        run: ./mvnw -B --no-transfer-progress test
 
   # Full verification: reactor build + integration tests. The ITs run against
   # Testcontainers PostgreSQL and a real Keycloak container, so this job needs
@@ -47,7 +47,7 @@ jobs:
           docker pull postgres:16-alpine
 
       - name: Build and verify (Docker)
-        run: mvn -B --no-transfer-progress verify
+        run: ./mvnw -B --no-transfer-progress verify
 
       - name: Upload test reports on failure
         if: failure()
