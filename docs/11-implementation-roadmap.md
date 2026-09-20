@@ -1,5 +1,10 @@
 # E-Commerce Platform — Implementation Roadmap
 
+> **Note:** this is the original capability list. For the revised sequencing and
+> the "break-it-first" learning protocol, see
+> [`13-learning-roadmap.md`](13-learning-roadmap.md), which supersedes this
+> document as the implementation order.
+
 ## Phase 1 — Foundation
 - Repository structure
 - Java/Spring Boot baseline

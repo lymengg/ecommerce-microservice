@@ -1,6 +1,6 @@
 # Project Progress — session handoff
 
-Last updated: 2026-09-17 (Phase 4 security complete + fully verified)
+Last updated: 2026-09-20 (roadmap re-sequenced — see `docs/13-learning-roadmap.md`)
 
 ## Status: Phase 4 (Security) — DONE, `mvn -B verify` GREEN
 
@@ -9,7 +9,7 @@ Last updated: 2026-09-17 (Phase 4 security complete + fully verified)
 - `980569a` — fix: harden Phase 4 verification findings
 - Full reactor `mvn -B verify` green with Docker: 113 tests (57 unit + 56
   integration incl. Testcontainers PostgreSQL + a real Keycloak container).
-  Branch is ahead of origin/main by 3 commits, NOT pushed.
+  `main` is in sync with `origin/main` (pushed).
 
 ### What Phase 4 delivered
 - **Keycloak (ADR-005)** — realm `ecommerce` exported to
@@ -146,11 +146,36 @@ Manual end-to-end flow (documented in README.md "Manual checkout flow"):
   the default); `serviceAccountClientId` users with `realmRoles` import
   correctly (verified by `GatewayKeycloakIT.realmImportCreatesUsersAndRoles`).
 
-## Next phases (docs/11-implementation-roadmap.md)
-- **Phase 5 — Kafka**: event contracts, outbox publisher, consumers with
-  idempotency, DLT. The outbox tables exist per service; the checkout
-  orchestrator is structured so the REST saga can be replaced by events
-  without changing the checkout contract (see ADR-013 boundary).
-- **Phase 6 — Resilience**: timeouts, circuit breakers, retries (the
-  RestClient/Apache HC5 foundation is already in `common`).
-- **Phase 7 — Observability**: OpenTelemetry, Prometheus/Grafana.
+## Next phases (docs/13-learning-roadmap.md)
+
+The sequencing was revised on 2026-09-20 — **`docs/13-learning-roadmap.md`
+supersedes `docs/11-implementation-roadmap.md` as the implementation order**
+(doc 11 remains the original capability list). Two changes matter when
+resuming: tracing moved ahead of Kafka, and observability was split in two.
+Each phase runs the "break it first" protocol (reproduce the failure the
+pattern prevents, measure it, then implement) — see doc 13 §1.
+
+- **Phase 5 — Observability: tracing** (pulled forward from old Phase 7).
+  OpenTelemetry across all services + gateway, OTLP → Tempo/Jaeger, JSON logs
+  with `traceId`/`spanId`, correlation id propagation (doc 08 §2-3, §5).
+  Needed *before* Kafka: async failures are invisible without trace context.
+- **Phase 6 — Kafka & event-driven** (was Phase 5, expanded). Four sub-steps:
+  6a dual-write → outbox (ADR-009) → then Debezium CDC for comparison;
+  6b consumers (idempotency, topics, partition keys, groups, bounded retry,
+  DLT); 6c replace one saga flow with choreography and compare against the
+  current orchestration (ADR-013 anticipates this); 6d schema evolution.
+  The outbox tables exist per service; the checkout orchestrator is
+  structured so the REST saga can be replaced by events without changing the
+  checkout contract.
+- **Phase 7 — Resilience** (was Phase 6, moved after Kafka). Timeouts, circuit
+  breakers, retries, bulkheads (the RestClient/Apache HC5 foundation is
+  already in `common`), failure-injection tests (doc 10 §7), plus the
+  reconciliation job for inconsistent orders after a partial saga failure.
+- **Phase 8 — Observability: metrics/logs/alerts** (remainder of old Phase 7).
+  Micrometer → Prometheus, Grafana dashboards, Loki, alerts on symptoms
+  (doc 08 §4, §6-7) — including Kafka consumer lag and outbox backlog.
+- **Phases 9-12** — containerization (productionizing images, not learning
+  Docker), Kubernetes + Terraform + secrets management (**time-boxed**),
+  CI/CD + contract testing (doc 10 §5, previously unassigned), production
+  hardening. Deferred and known: mTLS / zero-trust internal transport
+  (doc 09 §6).
