@@ -16,6 +16,9 @@ import java.util.UUID;
  * Synchronous REST client for order-service: creates the order and advances
  * its state machine as the saga progresses. Order creation is idempotent via
  * the Idempotency-Key header.
+ *
+ * <p>Marking an order PAID is no longer done here: since Phase 6c that is
+ * driven by the {@code PaymentSucceeded} event consumed by order-service.
  */
 @Component
 public class OrderClient {
@@ -48,10 +51,6 @@ public class OrderClient {
 
     public OrderInfo markPaymentPending(UUID orderId) {
         return transition(orderId, "/payment-pending");
-    }
-
-    public OrderInfo markPaid(UUID orderId) {
-        return transition(orderId, "/paid");
     }
 
     public OrderInfo cancel(UUID orderId, String reason) {

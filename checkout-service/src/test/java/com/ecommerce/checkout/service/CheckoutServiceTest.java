@@ -50,7 +50,6 @@ class CheckoutServiceTest {
         when(orderClient.createOrder(any(), any())).thenReturn(orderInfo("DRAFT"));
         when(orderClient.markPending(orderId)).thenReturn(orderInfo("PENDING"));
         when(orderClient.markPaymentPending(orderId)).thenReturn(orderInfo("PAYMENT_PENDING"));
-        when(orderClient.markPaid(orderId)).thenReturn(orderInfo("PAID"));
         when(paymentClient.initiate(any(), any())).thenReturn(new PaymentInfo(
                 paymentId, orderId, "SUCCEEDED", new BigDecimal("22.00"), "USD", Instant.now()
         ));
@@ -62,14 +61,14 @@ class CheckoutServiceTest {
     }
 
     @Test
-    void checkoutMarksOrderPaidOnSuccess() {
+    void checkoutReturnsPaidAndHandsTheRestToEvents() {
         CheckoutResponse response = checkoutService.checkout(new CheckoutRequest(cartId, null, null), customerId, null);
 
         assertThat(response.orderId()).isEqualTo(orderId);
         assertThat(response.orderStatus()).isEqualTo("PAID");
         assertThat(response.paymentStatus()).isEqualTo("SUCCEEDED");
-        verify(inventoryClient).commitByOrder(orderId);
-        verify(orderClient).markPaid(orderId);
+        // Phase 6c: the orchestrator no longer commits stock or marks the order
+        // paid itself — the PaymentSucceeded -> order -> inventory events do.
         verify(cartClient).markCheckedOut(cartId);
     }
 
@@ -85,7 +84,6 @@ class CheckoutServiceTest {
 
         verify(inventoryClient).releaseByOrder(orderId);
         verify(orderClient).cancel(eq(orderId), eq("PAYMENT_FAILED"));
-        verify(orderClient, never()).markPaid(orderId);
     }
 
     @Test
@@ -111,7 +109,5 @@ class CheckoutServiceTest {
         assertThat(response.orderStatus()).isEqualTo("PAID");
         verify(orderClient, never()).markPending(orderId);
         verify(orderClient, never()).markPaymentPending(orderId);
-        verify(orderClient, never()).markPaid(orderId);
-        verify(inventoryClient, never()).commitByOrder(orderId);
     }
 }

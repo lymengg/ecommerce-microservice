@@ -13,10 +13,12 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Synchronous REST client for inventory-service: reserves stock per cart line,
- * then commits or releases every reservation of an order depending on the
- * payment outcome. A declined reserve surfaces as InsufficientStockException
- * so the saga can compensate.
+ * Synchronous REST client for inventory-service: reserves stock per cart line
+ * and releases it when the saga compensates. A declined reserve surfaces as
+ * InsufficientStockException so the saga can compensate.
+ *
+ * <p>Committing a reservation is no longer done here: since Phase 6c that is
+ * driven by the {@code OrderConfirmed} event consumed by inventory-service.
  */
 @Component
 public class InventoryClient {
@@ -43,10 +45,6 @@ public class InventoryClient {
         } catch (RestClientResponseException ex) {
             throw RemoteExceptionMapper.from(ex);
         }
-    }
-
-    public void commitByOrder(UUID orderId) {
-        postOrderAction("/internal/api/v1/inventory/reservations/commit-by-order", orderId);
     }
 
     public void releaseByOrder(UUID orderId) {

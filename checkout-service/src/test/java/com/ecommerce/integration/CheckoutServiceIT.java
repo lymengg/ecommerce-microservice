@@ -35,16 +35,12 @@ class CheckoutServiceIT extends AbstractCheckoutIT {
                 .willReturn(okJson(orderJson("PAYMENT_PENDING"))));
         WIRE_MOCK.stubFor(post(urlEqualTo("/api/v1/payments"))
                 .willReturn(okJson(paymentJson("SUCCEEDED"))));
-        WIRE_MOCK.stubFor(post(urlEqualTo("/internal/api/v1/inventory/reservations/commit-by-order"))
-                .willReturn(noContent()));
-        WIRE_MOCK.stubFor(post(urlEqualTo("/internal/api/v1/orders/" + ORDER_ID + "/paid"))
-                .willReturn(okJson(orderJson("PAID"))));
         WIRE_MOCK.stubFor(post(urlEqualTo("/internal/api/v1/cart/" + CART_ID + "/checkout"))
                 .willReturn(noContent()));
     }
 
     @Test
-    void successfulCheckoutCommitsStockAndClosesCart() throws Exception {
+    void successfulCheckoutReturnsPaidAndClosesCartWithoutCommittingStockSynchronously() throws Exception {
         stubHappyPath();
 
         checkout(null)
@@ -52,8 +48,10 @@ class CheckoutServiceIT extends AbstractCheckoutIT {
                 .andExpect(jsonPath("$.orderStatus").value("PAID"))
                 .andExpect(jsonPath("$.paymentStatus").value("SUCCEEDED"));
 
-        WIRE_MOCK.verify(postRequestedFor(urlEqualTo("/internal/api/v1/inventory/reservations/commit-by-order")));
-        WIRE_MOCK.verify(postRequestedFor(urlEqualTo("/internal/api/v1/orders/" + ORDER_ID + "/paid")));
+        // Phase 6c: these are now driven by the PaymentSucceeded ->
+        // OrderConfirmed -> inventory choreography, not by the orchestrator.
+        WIRE_MOCK.verify(0, postRequestedFor(urlEqualTo("/internal/api/v1/inventory/reservations/commit-by-order")));
+        WIRE_MOCK.verify(0, postRequestedFor(urlEqualTo("/internal/api/v1/orders/" + ORDER_ID + "/paid")));
         WIRE_MOCK.verify(postRequestedFor(urlEqualTo("/internal/api/v1/cart/" + CART_ID + "/checkout")));
     }
 

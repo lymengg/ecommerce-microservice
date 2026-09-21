@@ -127,6 +127,30 @@ public class OrderService {
 
     @Transactional
     public OrderResponse markPaid(UUID orderId) {
+        return applyPaid(orderId);
+    }
+
+    /**
+     * Event-driven confirmation of a payment (Phase 6c choreography). Called by
+     * the {@code PaymentSucceeded} consumer instead of the orchestrator's REST
+     * call.
+     *
+     * <p>Idempotent when the order is already PAID — Kafka is at-least-once, so
+     * a redelivery must be a no-op. Any other state is a genuine
+     * out-of-order/invalid event and is thrown so the listener's bounded retry
+     * and dead-letter handling deal with it rather than corrupting the state
+     * machine.
+     */
+    @Transactional
+    public void confirmPayment(UUID orderId) {
+        Order order = requireOrder(orderId);
+        if (order.getStatus() == OrderStatus.PAID) {
+            return;
+        }
+        applyPaid(orderId);
+    }
+
+    private OrderResponse applyPaid(UUID orderId) {
         OrderResponse response = transition(orderId, OrderStatus.PAID, "Payment succeeded");
         outboxService.record("order", orderId.toString(), "OrderConfirmed", Map.of(
                 "orderId", orderId.toString(),

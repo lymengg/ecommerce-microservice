@@ -26,9 +26,15 @@ import java.util.UUID;
  * Checkout orchestration (saga). Validates the cart, prices the order from the
  * catalog, reserves inventory, initiates the payment, and compensates (release
  * inventory + cancel order) when the payment fails. Every step is a synchronous
- * REST call to its owning service; there is no cross-service transaction. The
- * class is deliberately structured so a Phase 5 event-driven version can
- * replace the REST calls without changing the checkout contract.
+ * REST call to its owning service; there is no cross-service transaction.
+ *
+ * <p>Phase 6c: the success leg is now <em>choreographed</em> rather than
+ * orchestrated. The orchestrator stops once the payment is accepted;
+ * payment-service publishes {@code PaymentSucceeded}, order-service consumes it
+ * and publishes {@code OrderConfirmed}, and inventory-service consumes that to
+ * commit the reservations. The checkout contract (request/response shape) is
+ * unchanged, but the order and stock converge asynchronously — see ADR-016 for
+ * the orchestration-vs-choreography comparison.
  */
 @Service
 public class CheckoutService {
@@ -102,8 +108,12 @@ public class CheckoutService {
 
         if ("SUCCEEDED".equals(payment.status())) {
             if ("PAYMENT_PENDING".equals(order.status())) {
-                inventoryClient.commitByOrder(order.orderId());
-                orderClient.markPaid(order.orderId());
+                // Phase 6c: order confirmation and the inventory commit are no
+                // longer synchronous calls from the orchestrator. payment-service
+                // publishes PaymentSucceeded; order-service consumes it, marks the
+                // order PAID and publishes OrderConfirmed; inventory-service
+                // consumes that and commits the reservations. Checkout returns as
+                // soon as the payment is accepted and the system converges.
                 cartClient.markCheckedOut(request.cartId());
             }
             span.setAttribute("checkout.outcome", "PAID");
