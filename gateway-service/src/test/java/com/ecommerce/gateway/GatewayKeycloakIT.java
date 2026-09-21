@@ -25,6 +25,7 @@ import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -86,9 +87,27 @@ class GatewayKeycloakIT {
 
     @Test
     void realmImportCreatesUsersAndRoles() throws Exception {
-        assertThat(rolesOf(token("customer1", "customer1-password"))).contains("CUSTOMER");
+        String customerToken = token("customer1", "customer1-password");
+        assertThat(rolesOf(customerToken)).contains("CUSTOMER");
         assertThat(rolesOf(token("admin1", "admin1-password"))).contains("ADMIN");
         assertThat(rolesOf(serviceToken())).contains("SERVICE");
+
+        // Regression guard. Every service derives the caller's identity from the
+        // `sub` claim, and `sub` comes from Keycloak's `basic` client scope.
+        // Omitting `basic` from a client's defaultClientScopes (which *overrides*
+        // the realm default rather than extending it) yields tokens that validate
+        // correctly and carry the right roles but have no subject — so every
+        // authenticated business call returns 403. Mocked-JWT tests cannot see
+        // this because they construct the Authentication directly, so it has to
+        // be asserted here, against a real token from a real realm import.
+        String subject = subjectOf(customerToken);
+        assertThat(subject).as("access token must carry a sub claim").isNotNull();
+        assertThat(UUID.fromString(subject)).as("sub must be the user's UUID").isNotNull();
+    }
+
+    private static String subjectOf(String jwt) throws Exception {
+        JsonNode subject = decode(jwt).get("sub");
+        return subject == null ? null : subject.asText();
     }
 
     private static List<String> rolesOf(String jwt) throws Exception {

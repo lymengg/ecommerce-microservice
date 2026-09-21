@@ -202,15 +202,57 @@ Neither was a tracing problem; both blocked the end-to-end run.
    propagate it. Verified: the same trace went from many distinct correlation
    ids to exactly one.
 
+### Phase 4 authorization: blind spot closed (2026-09-21)
+
+The `sub` bug exposed that Phase 4 was signed off without ever driving a
+**servlet service** with a **real Keycloak token**: the mocked-JWT ITs inject
+authorities directly, and `GatewayKeycloakIT` only exercises the gateway. So the
+whole rule set was re-verified against the live stack with real tokens —
+`scripts/verify-authz.sh`, **20/20 checks pass**:
+
+| Area | Checks | Result |
+|---|---|---|
+| catalog | public GET, CUSTOMER write → 403, ADMIN write → 201 | pass |
+| cart | CUSTOMER → 200, ADMIN → 403 (service is CUSTOMER-only), no token → 401 | pass |
+| internal `/internal/**` | CUSTOMER → 403, SERVICE → 200/201 (inventory, catalog, order) | pass |
+| ADR-013 boundary | mismatched `customerId` on a CUSTOMER token → 403 | pass |
+| object ownership | own order → 200; other customer's order/payment → **404, not 403** | pass |
+| gateway edge | `/internal/**` via gateway → 403; public GET → 200; no token → 401 | pass |
+
+**Conclusion: the rules were correct all along — the missing `sub` claim was the
+only real defect.** Note cart returns 403 for an ADMIN token: the gateway admits
+CUSTOMER/ADMIN, but the service is authoritative and CUSTOMER-only (defense in
+depth working as intended).
+
+Two follow-ups landed from this:
+
+- **Regression guard.** `GatewayKeycloakIT.realmImportCreatesUsersAndRoles` now
+  asserts the access token carries a `sub` claim and that it parses as a UUID.
+  Verified by running it against the unfixed realm first: it fails with
+  `[access token must carry a sub claim]`, so it genuinely catches the bug.
+- **Realm file drift removed.** There were **two** copies of the realm —
+  `infra/keycloak/ecommerce-realm.json` (what the dev stack uses) and
+  `gateway-service/src/test/resources/keycloak/ecommerce-realm.json` (what the
+  IT imported). They had already diverged: the test copy was missing `basic`,
+  so **the IT was validating a realm nobody runs**. The duplicate is deleted and
+  `gateway-service/pom.xml` now copies the real file into the test classpath at
+  `process-test-resources`, so there is exactly one source of truth.
+
+The smoke script is the only thing that exercises real tokens against servlet
+services, so run it after any change to the realm, the security config, or an
+authorization rule.
+
 ### Not done yet (rest of Phase 5)
 
 - Re-run `docs/phase-5-tracing-baseline.md` to fill the "After tracing" columns.
 - Collector-side sampling policy and TLS/auth between services and the collector
   (deliberately deferred to Phases 9-10; recorded in ADR-014).
 
-Done since the last revision: ADR-014 written, README run/verify steps corrected
-and a Tracing section added, and `RestClientsTest` guards the correlation-id
-propagation (65 unit tests now, up from 62).
+Done since the last revision: ADR-014 written; README run/verify steps corrected
+and a Tracing section added; `RestClientsTest` guards the correlation-id
+propagation (65 unit tests, up from 62); `scripts/verify-authz.sh` added and
+passing 20/20; `GatewayKeycloakIT` guards the `sub` claim; the duplicated realm
+file removed.
 
 ### Run / verify recipe
 

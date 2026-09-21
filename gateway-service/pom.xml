@@ -64,6 +64,38 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
+
+            <!-- The Keycloak IT imports a realm into a container from the test
+                 classpath, but the realm that matters is the one the dev stack
+                 uses (infra/keycloak/ecommerce-realm.json). Keeping a second
+                 copy under src/test/resources let the two drift — and they did:
+                 the test copy was missing the `basic` client scope, so the IT
+                 was validating a realm nobody runs. Copy the real file in at
+                 build time so there is exactly one source of truth. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>copy-keycloak-realm-for-tests</id>
+                        <phase>process-test-resources</phase>
+                        <goals>
+                            <goal>copy-resources</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>${project.build.testOutputDirectory}/keycloak</outputDirectory>
+                            <resources>
+                                <resource>
+                                    <directory>${maven.multiModuleProjectDirectory}/infra/keycloak</directory>
+                                    <includes>
+                                        <include>ecommerce-realm.json</include>
+                                    </includes>
+                                </resource>
+                            </resources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 </project>

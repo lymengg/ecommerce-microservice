@@ -238,6 +238,23 @@ personal identifier (doc 08 §3).
 ./mvnw verify      # full reactor: unit + integration tests (Testcontainers, requires Docker)
 ```
 
+### Authorization smoke test
+
+```bash
+./scripts/verify-authz.sh    # against a running stack; exits non-zero on failure
+```
+
+Drives **real Keycloak tokens** against every servlet service and checks role
+rules, the `/internal/**` SERVICE-only boundary, object-level ownership
+(other customers' resources must be 404, never 403), the ADR-013
+`customerId`-mismatch rule, and the gateway edge. It exists because the
+mocked-JWT ITs inject authorities directly and `GatewayKeycloakIT` only covers
+the gateway — so "real token → servlet service → business endpoint" is not
+covered by any automated test. A missing `basic` client scope once made every
+authenticated business call return 403 for a whole phase without a test
+noticing. Run it after any change to the realm, the security config, or an
+authorization rule.
+
 Per-service integration tests boot each service against its own Testcontainers
 PostgreSQL and stub downstream services with WireMock. Security behavior is
 covered at three levels: unit tests for the JWT claim mapping (`common`),
