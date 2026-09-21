@@ -14,7 +14,11 @@
 services:
   keycloak:
     image: quay.io/keycloak/keycloak:26.7.4
-    command: ["start-dev", "--import-realm"]
+    # Keycloak 26 serves health on the *management* port 9000, not the main HTTP
+    # port. Probing 8080 returns 404, so the healthcheck below would never pass
+    # and the container would report unhealthy forever while serving normally.
+    # --health-enabled makes that endpoint explicit.
+    command: ["start-dev", "--import-realm", "--health-enabled=true"]
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
@@ -23,7 +27,7 @@ services:
     volumes:
       - ./infra/keycloak:/opt/keycloak/data/import:ro
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080; echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; cat <&3 | grep -q '200 OK'"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000; echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; cat <&3 | grep -q '200 OK'"]
       interval: 10s
       timeout: 5s
       retries: 20

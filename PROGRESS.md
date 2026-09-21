@@ -289,6 +289,11 @@ docker compose up -d keycloak jaeger otel-collector
 - **`--import-realm` skips a realm that already exists.** Editing
   `infra/keycloak/ecommerce-realm.json` has no effect until the container is
   recreated: `docker compose rm -sf keycloak && docker compose up -d keycloak`.
+- **Keycloak 26 serves health on the management port 9000, not 8080.** The
+  compose healthcheck originally probed 8080 and got a 404, so the container sat
+  at `unhealthy` indefinitely while Keycloak was serving normally — a
+  misleading signal for anyone reading `docker compose ps`. Fixed by probing
+  9000 (`--health-enabled=true` makes the endpoint explicit).
 
 ### Workstation setup (Windows, cost hours on 2026-09-20 — read first)
 
