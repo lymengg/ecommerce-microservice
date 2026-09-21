@@ -59,7 +59,7 @@ Introduce database-per-service.
   (`GatewayKeycloakIT`); security defaults: no secrets committed, restricted
   actuator exposure planned with Phase 9
 
-## Phase 5 — Kafka
+## Phase 5 — Kafka ✅ (delivered as "Phase 6 — Kafka & event-driven" in the revised plan, docs/13)
 - Event contracts
 - Outbox
 - Producers

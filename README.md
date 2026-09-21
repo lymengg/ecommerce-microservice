@@ -16,7 +16,8 @@ Full specifications live in [`docs/`](docs/README.md).
 
 ```
 ├── common/             shared library: RFC 9457 error handling (ProblemDetail),
-│                       transactional outbox (ADR-009), REST client helpers,
+│                       transactional outbox (ADR-009) + Kafka publisher and
+│                       event envelope/consumers (ADR-015), REST client helpers,
 │                       OAuth2 resource-server security config, Keycloak JWT
 │                       role mapping, client-credentials token provider
 ├── catalog-service/    products + lifecycle (DRAFT/ACTIVE/ARCHIVED)      :8081
@@ -54,10 +55,8 @@ code; there are no shared domain tables and no cross-service SQL (ADR-011).
 | checkout-service   | order      | `POST /api/v1/orders` (Idempotency-Key)           | create order |
 | checkout-service   | order      | `POST /internal/api/v1/orders/{id}/pending`       | advance state machine |
 | checkout-service   | order      | `POST /internal/api/v1/orders/{id}/payment-pending` | advance state machine |
-| checkout-service   | order      | `POST /internal/api/v1/orders/{id}/paid`          | advance state machine |
 | checkout-service   | order      | `POST /api/v1/orders/{id}/cancel`                 | compensate |
 | checkout-service   | inventory  | `POST /internal/api/v1/inventory/reservations`    | reserve per line |
-| checkout-service   | inventory  | `POST /internal/api/v1/inventory/reservations/commit-by-order` | commit on success |
 | checkout-service   | inventory  | `POST /internal/api/v1/inventory/reservations/release-by-order` | release on failure |
 | checkout-service   | payment    | `POST /api/v1/payments` (Idempotency-Key)         | initiate payment |
 
@@ -73,15 +72,81 @@ Idempotency keys and server-authoritative pricing are preserved: prices are
 never sent by clients; every order line is re-priced from the catalog at
 creation time and snapshotted (historical order prices are immutable).
 
+**Phase 6c:** the *completion* of a successful payment is no longer a REST call
+from the orchestrator. `inventory.commitByOrder` and `order.markPaid` were
+replaced by events (see [Events](#events-kafka) below); those internal endpoints
+remain available but checkout no longer calls them.
+
+## Events (Kafka)
+
+Services also communicate **asynchronously** (doc 03 §3): side effects that do
+not need an immediate answer travel as domain events. This is what lets a
+consumer be down and catch up later, and stops a slow subscriber from failing a
+checkout.
+
+### The outbox → publisher → consumer path
+
+Business state and the event are written in **one local transaction** (the
+transactional outbox, ADR-009). A scheduled publisher then drains
+`outbox_events` to Kafka and marks `published_at` — the request path never
+talks to the broker, so a Kafka outage cannot fail a checkout. Consumers are
+**idempotent** (a durable `processed_events` table written in the same
+transaction as the business change), so at-least-once delivery has exactly-once
+effects.
+
+```text
+service tx ──► outbox_events row ──► OutboxPublisher ──► <domain>.events
+                                    (poll + SKIP LOCKED)       │
+                                                               ▼
+                                @KafkaListener (idempotent; bounded retry with
+                                backoff; failures → <domain>.events.DLT)
+```
+
+### Topics and events
+
+| Topic | Events | Producer | Consumer (group) |
+|---|---|---|---|
+| `payment.events` | `PaymentInitiated`, `PaymentSucceeded`, `PaymentFailed` | payment-service | order-service |
+| `order.events` | `OrderCreated`, `OrderConfirmed`, `OrderCancelled` | order-service | inventory-service |
+| `inventory.events` | `InventoryReserved`, `InventoryReleased`, `InventoryCommitted`, `InventoryExpired` | inventory-service | — |
+| `catalog.events`, `cart.events` | (reserved for later phases) | — | — |
+
+Each topic has a `<topic>.DLT` dead-letter twin: a record that exhausts its
+retries (3, exponential backoff) is published there with its original payload
+and headers so it can be replayed once the bug is fixed.
+
+### The envelope (doc 06 §1)
+
+```json
+{ "eventId": "...", "eventType": "PaymentSucceeded", "eventVersion": 1,
+  "aggregateId": "...", "occurredAt": "...", "producer": "payment-service",
+  "correlationId": "...", "traceId": "...", "payload": { "orderId": "..." } }
+```
+
+The partition key is the aggregate id (order id / payment id / reservation id),
+so events for one aggregate keep their order. Kafka ordering is
+**partition-local** — no business logic assumes global ordering (doc 06 §12).
+Schema changes are additive-only and versioned; consumers ignore unknown fields
+(tolerant readers, doc 06 §9).
+
+### Choreography (Phase 6c)
+
+The success leg of the saga is **choreographed** rather than orchestrated:
+payment-service publishes `PaymentSucceeded`; order-service consumes it, marks
+the order PAID and publishes `OrderConfirmed`; inventory-service consumes that
+and commits the reservation. Checkout returns as soon as the payment is
+accepted, so the order and stock converge **asynchronously**. The rest of the
+saga — and all compensation — stays orchestrated. The reasoning is in ADR-016.
+
 ## Business rules implemented
 
 - **Server-authoritative pricing** — clients send product ids + quantities; prices, tax, and totals are computed from the catalog
 - **Order state machine** — DRAFT -> PENDING -> PAYMENT_PENDING -> PAID -> ... with validated transitions; cancel allowed only from pre-paid states
 - **Inventory reservation** — atomic stock updates prevent overselling; reservations expire after 30 minutes (scheduled job in inventory-service)
 - **Payment lifecycle** — idempotent initiation (Idempotency-Key), idempotent webhook processing, refunds (full/partial)
-- **Checkout saga** — validate cart -> price order -> reserve inventory -> pay over REST; on failure: release inventory + cancel order (compensation). Structured so a Phase 5 event-driven version can replace the REST calls
+- **Checkout saga** — validate cart -> price order -> reserve inventory -> pay over REST; on failure: release inventory + cancel order (compensation). On success, order confirmation and the stock commit are driven by events (Phase 6c, ADR-016)
 - **Idempotency** — order creation and payment initiation via `Idempotency-Key` header
-- **Outbox records** — each service with a database has its own `outbox_events` table (ADR-009); the Kafka publisher lands in Phase 5
+- **Outbox records** — each service with a database has its own `outbox_events` table (ADR-009); a polling publisher drains them to Kafka and consumers are idempotent (ADR-015)
 - **Authentication** — OAuth2/OIDC via Keycloak (ADR-005); short-lived access tokens (5 min), refresh-token rotation; services validate issuer + signature (JWKS) + expiry
 - **Authorization** — gateway route RBAC (public product GETs, ADMIN writes, CUSTOMER cart/orders/payments/checkout); method security in services; object-level authorization in the owning service (a customer only reaches their own orders/carts/payments, other users' resources are 404)
 - **Service-to-service** — client-credentials tokens with the SERVICE role; `/internal/**` endpoints are SERVICE-only and unreachable through the gateway
@@ -90,12 +155,13 @@ creation time and snapshotted (historical order prices are immutable).
 
 ## Run (full stack locally)
 
-Requirements: Docker (PostgreSQL + Keycloak + Jaeger + OTel Collector), Java 21.
-Maven itself is not needed — use the wrapper (`./mvnw`).
+Requirements: Docker (PostgreSQL + Keycloak + Jaeger + OTel Collector + Kafka),
+Java 21. Maven itself is not needed — use the wrapper (`./mvnw`).
 
 ```bash
-# 1. start Keycloak (:8087), Jaeger (:16686) and the OTel Collector (:4317)
-docker compose up -d keycloak jaeger otel-collector
+# 1. start Keycloak (:8087), Jaeger (:16686), the OTel Collector (:4317)
+#    and Kafka (:9092, KRaft mode — no ZooKeeper)
+docker compose up -d keycloak jaeger otel-collector kafka
 
 # 2. start PostgreSQL with one database per service
 #    host port 5433, because 5432 is often taken by a local PostgreSQL —
@@ -193,7 +259,8 @@ CART=$(curl -s $GATEWAY/api/v1/cart -H "$CUSTOMER" | sed -E 's/.*"cartId":"([^"]
 curl -s -X POST $GATEWAY/api/v1/cart/items -H "$CUSTOMER" -H 'Content-Type: application/json' \
   -d "{\"productId\":<id>,\"quantity\":2}"
 
-# checkout -> order PAID, stock committed
+# checkout -> the response reports PAID/SUCCEEDED immediately; the order row and
+# stock converge a moment later via the PaymentSucceeded -> OrderConfirmed events
 curl -s -X POST $GATEWAY/api/v1/checkout -H "$CUSTOMER" -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: checkout-1' -d "{\"cartId\":\"$CART\",\"currency\":\"USD\"}"
 
@@ -256,7 +323,10 @@ noticing. Run it after any change to the realm, the security config, or an
 authorization rule.
 
 Per-service integration tests boot each service against its own Testcontainers
-PostgreSQL and stub downstream services with WireMock. Security behavior is
+PostgreSQL (plus a Testcontainers Kafka broker for order and inventory) and stub
+downstream services with WireMock. Kafka is never mocked (doc 10 §3): the event
+tests run against a real broker — duplicate delivery, out-of-order delivery,
+poison message → DLT, and Kafka-down (outbox retains, then drains on recovery). Security behavior is
 covered at three levels: unit tests for the JWT claim mapping (`common`),
 mocked-JWT MockMvc/WebTestClient tests for role rules and object-level
 authorization in every service plus the gateway's route RBAC (no Docker
@@ -269,6 +339,10 @@ service-account role mapping) and token relay end-to-end (requires Docker).
 | Property | Default | Service | Meaning |
 |---|---|---|---|
 | `ecommerce.tax-rate` | `0.10` | order | tax applied to order subtotals |
+| `spring.kafka.bootstrap-servers` | `localhost:9092` | order/payment/inventory | Kafka broker (KRaft) |
+| `ecommerce.outbox.poll-interval-ms` | `1000` | order/payment/inventory | outbox publisher poll interval |
+| `ecommerce.outbox.batch-size` | `100` | order/payment/inventory | rows locked and published per cycle |
+| `ecommerce.outbox.enabled` | `true` | order/payment/inventory | enable/disable the scheduled publisher |
 | `ecommerce.inventory.reservation-ttl` | `PT30M` | inventory | reservation expiry duration |
 | `ecommerce.inventory.expiry-interval-ms` | `60000` | inventory | expiry sweep interval |
 | `ecommerce.payment.decline-above` | `10000` | payment | mock provider declines amounts above this |

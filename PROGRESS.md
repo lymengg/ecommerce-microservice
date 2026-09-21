@@ -1,14 +1,15 @@
 # Project Progress — session handoff
 
-Last updated: 2026-09-21 (Phase 5 tracing verified end-to-end; uncommitted)
+Last updated: 2026-09-21 (Phase 6 Kafka/event-driven implemented and verified)
 
-## Status: Phase 5 (Observability/tracing) — verified end-to-end, uncommitted
+## Status: Phase 6 (Kafka & event-driven) — implemented and verified
 
-Phase 4 is DONE. Phase 5 tracing is implemented and now verified against a live
-Jaeger with a real Keycloak token: one checkout produces a single trace across
-all seven services carrying one correlation id. The work is **uncommitted** —
-see "Phase 5 (tracing)" below for the state, the two bugs found on the way, and
-what remains.
+Phases 4 and 5 are DONE and committed. Phase 6 is implemented and verified
+against a live stack: the transactional outbox now publishes, consumers are
+idempotent with bounded retry and a dead-letter topic, one saga leg is
+choreographed, and **one checkout is a single Jaeger trace across the seven
+services including the Kafka produce/consume boundary**. See "Phase 6 (Kafka &
+event-driven)" below for the detail and the gotchas found on the way.
 
 ### Phase 4 record
 
@@ -263,6 +264,74 @@ docker compose up -d keycloak jaeger otel-collector
 # Jaeger UI: http://localhost:16686
 ```
 
+## Phase 6 (Kafka & event-driven) — implemented and verified
+
+Goal: make the outbox tables actually publish, add idempotent consumers with a
+dead-letter path, convert one saga leg to choreography, and keep the trace
+unbroken across the broker (doc 13 §3 Phase 6, doc 06).
+
+### What is implemented
+
+- **Infrastructure** — Kafka in **KRaft mode** (`apache/kafka:3.9.1`, no
+  ZooKeeper) in `docker-compose.yml`, with auto-topic-creation disabled so a
+  typo fails loudly. Topics and their `.DLT` twins are declared by `KafkaAdmin`.
+- **Client** — Spring for Apache Kafka (`spring-kafka`), an *optional*
+  dependency of `common` so catalog/cart/checkout never open a broker
+  connection. Rationale (vs Spring Cloud Stream) in ADR-015.
+- **Envelope** — `com.ecommerce.common.messaging.EventEnvelope`, JSON, doc 06
+  §1 shape, with `eventVersion` and a tolerant reader
+  (`@JsonIgnoreProperties(ignoreUnknown = true)`).
+- **Publisher** — `OutboxPublisher`: a `@Scheduled` poller that locks a batch
+  with `SELECT … FOR UPDATE SKIP LOCKED`, publishes to the domain topic keyed by
+  aggregate id, and marks `published_at`. Kafka down ⇒ rollback ⇒ rows retained
+  and retried; scaling out cannot double-publish (ADR-015).
+- **Trace continuity** — the request's W3C `traceparent` is captured into
+  `outbox_events.trace_parent` at record time and restored as the current
+  context at publish time, so the consumer's span joins the original trace.
+  (The agent cannot do this alone: the poller has no request context.)
+- **Consumers** — order-service consumes `payment.events` (PaymentSucceeded →
+  order PAID, then emits `OrderConfirmed`); inventory-service consumes
+  `order.events` (OrderConfirmed → commit reservations). Each is idempotent via
+  a durable `processed_events` table written **in the same transaction** as the
+  business change.
+- **Retry + DLT** — `DefaultErrorHandler` with exponential backoff (500 ms, 1 s,
+  2 s) then `<topic>.DLT`, carrying the original record so it can be replayed.
+- **6c choreography** — checkout no longer calls `inventory.commitByOrder` /
+  `order.markPaid`; the events drive them. Compensation stays orchestrated.
+  Compared honestly in ADR-016.
+- **Schema evolution (6d)** — additive-only, versioned, tolerant readers; unit
+  tests pin unknown-field and missing-field tolerance.
+
+### Verified
+
+- `./mvnw test` → **76 unit tests** green (was 65).
+- `./mvnw verify` → whole reactor green with Docker: every existing IT plus
+  `OutboxPublisherIT`, `PaymentEventsConsumerIT`, `OrderEventsConsumerIT`
+  (duplicate delivery, out-of-order → DLT, poison → DLT, Kafka-down retains and
+  drains). Brokers are real Testcontainers Kafka, never mocked.
+- **Live stack**: a checkout through the gateway produced one trace
+  (`c65eb3177827d953c93e9e5be51548ef`, 443 spans) containing all seven services
+  and both `payment.events publish`/`payment.events process` and
+  `order.events publish`/`order.events process` — one trace across the broker.
+  Order converged to `PAID` and inventory to `COMMITTED` via events; outbox rows
+  all `published_at` set; the poison record landed in `payment.events.DLT`.
+
+### Phase 6 gotchas (also in the list below)
+
+- Spring Kafka's `DeadLetterPublishingRecoverer` default DLT suffix is `-dlt`,
+  not `.DLT`; with broker auto-create disabled, a wrong suffix wedges the
+  consumer in an endless "record in retry" loop. The destination resolver must
+  be overridden.
+- The publisher serializes `Instant`, so it needs an `ObjectMapper` with the
+  JSR-310 module — Boot's is fine; a bare `new ObjectMapper()` in a unit test is
+  not.
+- `org.testcontainers.kafka.KafkaContainer` works with `apache/kafka:3.9.1`, but
+  `getBootstrapServers()` can carry a `PLAINTEXT://` prefix that Kafka clients
+  reject; strip it before injecting `spring.kafka.bootstrap-servers`.
+- On Windows a running service **locks its fat jar**, so `mvn package` leaves a
+  stale jar behind (and `clean` fails with "being used by another process").
+  Stop the services before rebuilding — this cost a full debugging cycle here.
+
 ## Environment gotchas (learned the hard way — read before running)
 - **Port 5432 is taken by a local Windows PostgreSQL.** Start the Docker
   Postgres on a different host port and pass it to every service:
@@ -393,6 +462,35 @@ docker compose up -d keycloak jaeger otel-collector
   copies the event's existing MDC map before adding `trace_id`/`span_id`/
   `trace_flags`, so `%X{correlationId}` works alongside them. (Verified by
   instrumenting the filter: one line rendered trace, span *and* corr together.)
+- **Spring Kafka's dead-letter suffix is `-dlt`, not `.DLT`.** The default
+  `DeadLetterPublishingRecoverer` destination resolver appends `-dlt`, so a
+  message that exhausts its retries goes to `payment.events-dlt`. With
+  `KAFKA_AUTO_CREATE_TOPICS_ENABLE=false` that topic does not exist, the DLT
+  publish fails, and the consumer wedges in an endless "Record in retry and not
+  yet recovered" loop — **no later record on that partition is processed**. Fix:
+  pass a destination resolver returning `Topics.deadLetter(record.topic())`
+  (`<topic>.DLT`, doc 06 §6) and declare those topics via `KafkaAdmin`.
+- **The outbox publisher needs a JavaTimeModule-aware ObjectMapper.** The
+  envelope carries `occurredAt` as an `Instant`; a bare `new ObjectMapper()`
+  throws `InvalidDefinitionException: Java 8 date/time type … not supported`.
+  Boot's mapper is fine — only unit tests that build their own mapper hit this.
+- **`org.testcontainers.kafka.KafkaContainer` works with the official
+  `apache/kafka:3.9.1` image**, but `getBootstrapServers()` may include a
+  `PLAINTEXT://` scheme prefix Kafka clients reject; strip it before setting
+  `spring.kafka.bootstrap-servers`. (Also: `jps -l` prints the jar path for
+  executable jars, not the main class, so grepping for `com.ecommerce` matches
+  nothing — kill by PID, not by class name.)
+- **On Windows a running service locks its fat jar.** `mvn package` then leaves
+  the *previous* jar in place while still reporting SUCCESS, and `mvn clean`
+  fails with "The process cannot access the file because it is being used by
+  another process". A live-stack run therefore executed stale code and looked
+  like a DLT bug. **Stop the services before rebuilding**, and check the jar
+  mtime whenever behaviour does not match the source.
+- **The shared `ProcessedEvent` entity is scanned by every DB service**
+  (`@EntityScan("com.ecommerce")` + `ddl-auto: validate`), so all five
+  `outbox_events` tables gained `correlation_id`/`trace_parent` and every DB
+  service gained a `processed_events` table — even catalog/cart, which do not
+  consume yet. Forgetting one fails startup on schema validation.
 
 ## Next phases (docs/13-learning-roadmap.md)
 
@@ -403,11 +501,11 @@ resuming: tracing moved ahead of Kafka, and observability was split in two.
 Each phase runs the "break it first" protocol (reproduce the failure the
 pattern prevents, measure it, then implement) — see doc 13 §1.
 
-- **Phase 5 — Observability: tracing** (pulled forward from old Phase 7).
+- **Phase 5 — Observability: tracing** ✅ DONE (pulled forward from old Phase 7).
   OpenTelemetry across all services + gateway, OTLP → Tempo/Jaeger, JSON logs
   with `traceId`/`spanId`, correlation id propagation (doc 08 §2-3, §5).
   Needed *before* Kafka: async failures are invisible without trace context.
-- **Phase 6 — Kafka & event-driven** (was Phase 5, expanded). Four sub-steps:
+- **Phase 6 — Kafka & event-driven** ✅ DONE (was Phase 5, expanded). Four sub-steps:
   6a dual-write → outbox (ADR-009) → then Debezium CDC for comparison;
   6b consumers (idempotency, topics, partition keys, groups, bounded retry,
   DLT); 6c replace one saga flow with choreography and compare against the

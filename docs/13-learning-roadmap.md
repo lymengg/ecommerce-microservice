@@ -43,8 +43,8 @@ place recording knowledge that tutorials cannot give you.
 | ✅ | 2. Modular monolith | 2 | — | done |
 | ✅ | 3. Service extraction | 3 | — | done |
 | ✅ | 4. Security (Keycloak/OAuth2) | 4 | — | done |
-| **5** | **Observability — tracing only** | 7 | pulled forward, narrowed | you cannot debug async flows without traces |
-| **6** | **Kafka & event-driven** | 5 | expanded | + CDC alternative, choreography, reconciliation |
+| ✅ | 5. Observability — tracing only | 7 | pulled forward, narrowed | you cannot debug async flows without traces |
+| ✅ | 6. Kafka & event-driven | 5 | expanded | + CDC alternative, choreography, reconciliation |
 | **7** | **Resilience** | 6 | reordered after 6 | consumer resilience needs Kafka to exist |
 | **8** | **Observability — metrics/logs/alerts** | 7 | remainder | dashboards are only meaningful once there is async load |
 | **9** | **Containerization** | 8 | reframed | you already use Docker — this phase is *productionizing* it |
