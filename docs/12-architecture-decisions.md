@@ -80,3 +80,56 @@ these synchronous calls with events, at which point the same boundary applies
 to the producer of the event stream.
 
 **Status:** Accepted, Phase 4.
+
+## ADR-014: Distributed Tracing and the Correlation Id
+
+**Decision:** Instrument every service with the OpenTelemetry Java agent
+(bytecode instrumentation), exporting OTLP to an OpenTelemetry Collector which
+forwards to Jaeger. Keep the edge `X-Correlation-Id` as a client-facing support
+id, propagated on service-to-service calls; do not replace it with the trace id.
+
+**Context.** A request crosses seven services and a saga. Before this, request
+correlation was impossible rather than merely difficult: the gateway set
+`X-Correlation-Id`, but `RestClients` did not forward it and no service read it
+or logged it.
+
+**Why the Java agent, not the Spring Boot starter or Micrometer Tracing.**
+OpenTelemetry's own guidance is that the Java agent is the default choice for
+Spring Boot: widest out-of-the-box coverage, no application code. That matters
+concretely here — it instruments Apache HttpClient 5 (so W3C `traceparent`
+propagates across `RestClients` for free) and Logback (so `trace_id`/`span_id`
+reach every log line), which are exactly the two gaps this phase had to close.
+Micrometer Tracing would be the more idiomatic Spring choice and unifies better
+with Micrometer metrics in Phase 8; it is the fallback if the agent's startup
+cost or an interaction with another agent becomes a problem. Manual
+instrumentation is used only for the business span (`checkout.saga`), so the
+mechanism is understood rather than merely trusted.
+
+**Why a collector tier.** Applications talk to the collector, never to a
+tracing backend. That keeps the backend swappable (Phase 8 replaces Jaeger with
+Tempo without touching a service) and puts central concerns — sampling,
+redaction, batching, retry — in one place.
+
+**Why the correlation id survives.** A trace id is internal and unusable in a
+support conversation; a correlation id is quotable and already echoed to
+clients. The two are complementary: `traceparent` does propagation, while the
+correlation id is attached to the MDC and as a span attribute
+(`ecommerce.correlation_id`) so both logs and traces are searchable by it. That
+requires `RestClients` to forward the header — the fix that made one id cover
+the whole saga.
+
+**Consequences.**
+- `spring-boot:run` is instrumented; unit and integration tests are not, so
+  tests stay fast and need no collector.
+- The agent version is pinned in the parent POM and the jar fetched into a
+  gitignored `otel/` directory; a clean clone needs a root build before running
+  a single service with `-pl`.
+- The gateway does not depend on `common` (servlet Spring Web must not reach a
+  reactive app), so the two correlation header constants are duplicated with a
+  sync comment.
+- Development OTLP is plaintext and the collector binds to localhost. TLS and
+  authentication between services and the collector belong to Phases 9-10.
+- No customer id is placed on spans: it is a pseudonymous personal identifier
+  (doc 08 §3).
+
+**Status:** Accepted, Phase 5.

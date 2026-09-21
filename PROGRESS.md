@@ -147,7 +147,7 @@ system to see the contrast.
 
 ### Verified working (2026-09-21, full stack)
 
-- `./mvnw -B test` → BUILD SUCCESS, **62 unit tests**, all 8 modules.
+- `./mvnw -B test` → BUILD SUCCESS, **65 unit tests**, all 8 modules.
 - Synthetic OTLP span → collector → Jaeger query API.
 - **Full checkout saga end to end**, through the gateway, with a real Keycloak
   token: `POST /api/v1/checkout` → `orderStatus=PAID`,
@@ -204,9 +204,13 @@ Neither was a tracing problem; both blocked the end-to-end run.
 
 ### Not done yet (rest of Phase 5)
 
-- A test asserting downstream calls carry `traceparent` / the correlation header.
-- ADR-014, README run/verify updates.
 - Re-run `docs/phase-5-tracing-baseline.md` to fill the "After tracing" columns.
+- Collector-side sampling policy and TLS/auth between services and the collector
+  (deliberately deferred to Phases 9-10; recorded in ADR-014).
+
+Done since the last revision: ADR-014 written, README run/verify steps corrected
+and a Tracing section added, and `RestClientsTest` guards the correlation-id
+propagation (65 unit tests now, up from 62).
 
 ### Run / verify recipe
 

@@ -90,34 +90,48 @@ creation time and snapshotted (historical order prices are immutable).
 
 ## Run (full stack locally)
 
-Requirements: Docker (PostgreSQL + Keycloak), Java 21, Maven.
+Requirements: Docker (PostgreSQL + Keycloak + Jaeger + OTel Collector), Java 21.
+Maven itself is not needed — use the wrapper (`./mvnw`).
 
 ```bash
-# 1. start Keycloak (realm `ecommerce` imported from infra/keycloak) on :8087
-docker compose up -d keycloak
+# 1. start Keycloak (:8087), Jaeger (:16686) and the OTel Collector (:4317)
+docker compose up -d keycloak jaeger otel-collector
 
 # 2. start PostgreSQL with one database per service
+#    host port 5433, because 5432 is often taken by a local PostgreSQL —
+#    pass DB_PORT=5433 to every service, as in step 4
 docker run --name ecommerce-db -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
-  -p 5432:5432 -d postgres:16-alpine
-docker exec -i ecommerce-db psql -U postgres -c "
-  CREATE DATABASE ecommerce_catalog;
-  CREATE DATABASE ecommerce_cart;
-  CREATE DATABASE ecommerce_inventory;
-  CREATE DATABASE ecommerce_order;
-  CREATE DATABASE ecommerce_payment;"
+  -p 5433:5432 -d postgres:16-alpine
+# one -c per statement: CREATE DATABASE cannot run inside a transaction block,
+# and several statements in a single -c are wrapped in one
+docker exec -i ecommerce-db psql -U postgres \
+  -c "CREATE DATABASE ecommerce_catalog" \
+  -c "CREATE DATABASE ecommerce_cart" \
+  -c "CREATE DATABASE ecommerce_inventory" \
+  -c "CREATE DATABASE ecommerce_order" \
+  -c "CREATE DATABASE ecommerce_payment"
 
-# 3. build everything
-mvn -B package
+# 3. build everything, and fetch the pinned OTel agent into otel/
+#    `install`, not `package`: with -pl <service> alone the module cannot
+#    resolve `common`, which is only ever installed into the local repository
+./mvnw install -DskipTests
 
 # 4. start each service (own terminal or background)
-mvn -pl gateway-service     spring-boot:run   # :8080
-mvn -pl catalog-service     spring-boot:run   # :8081
-mvn -pl cart-service        spring-boot:run   # :8082
-mvn -pl inventory-service   spring-boot:run   # :8083
-mvn -pl order-service       spring-boot:run   # :8084
-mvn -pl payment-service     spring-boot:run   # :8085
-mvn -pl checkout-service    spring-boot:run   # :8086
+DB_PORT=5433 ./mvnw -pl gateway-service   spring-boot:run   # :8080
+DB_PORT=5433 ./mvnw -pl catalog-service   spring-boot:run   # :8081
+DB_PORT=5433 ./mvnw -pl cart-service      spring-boot:run   # :8082
+DB_PORT=5433 ./mvnw -pl inventory-service spring-boot:run   # :8083
+DB_PORT=5433 ./mvnw -pl order-service     spring-boot:run   # :8084
+DB_PORT=5433 ./mvnw -pl payment-service   spring-boot:run   # :8085
+DB_PORT=5433 ./mvnw -pl checkout-service  spring-boot:run   # :8086
 ```
+
+**Jaeger UI: http://localhost:16686** — a single checkout appears as one trace
+spanning all seven services. See [Tracing](#tracing) below.
+
+Keycloak note: `--import-realm` skips a realm that already exists, so after
+editing `infra/keycloak/ecommerce-realm.json` recreate the container
+(`docker compose rm -sf keycloak && docker compose up -d keycloak`).
 
 Default DB credentials are `postgres/postgres`; override with `DB_USER`,
 `DB_PASSWORD`, `DB_HOST`, `DB_PORT`, `DB_NAME` (defaults to `ecommerce_<service>`).
@@ -187,11 +201,41 @@ curl -s -X POST $GATEWAY/api/v1/checkout -H "$CUSTOMER" -H 'Content-Type: applic
 # order CANCELLED, stock released
 ```
 
+## Tracing
+
+Every service is instrumented with the **OpenTelemetry Java agent** and exports
+OTLP to a collector, which forwards to Jaeger (ADR-014). No application code is
+needed for HTTP propagation or log correlation — the agent instruments Apache
+HttpClient 5 and Logback directly.
+
+- **Traces** — <http://localhost:16686>. A checkout produces a single trace
+  across all seven services, with a `checkout.saga` span wrapping the saga
+  (`checkout.cart_id`, `checkout.currency`, `checkout.order_id`,
+  `checkout.outcome`).
+- **Logs** — every service emits `[trace=…,span=…,corr=…]`, so a log line can be
+  joined to its trace and back.
+- **Correlation id** — `X-Correlation-Id` is minted at the gateway, echoed to the
+  client and forwarded on service-to-service calls, so one id covers the whole
+  saga. It is attached to the MDC and to each span as
+  `ecommerce.correlation_id`, making it searchable in both logs and Jaeger.
+  Quote it in a bug report and the whole request can be reconstructed.
+
+The agent is pinned by `otel.agent.version` in the parent POM and fetched into
+`otel/` (gitignored) by a `validate`-phase `dependency:copy`. It is attached
+through `spring-boot-maven-plugin` `jvmArguments`, so **only `spring-boot:run`
+is instrumented** — unit and integration tests run without it and need no
+collector.
+
+Deliberately not done yet: TLS/authentication between services and the
+collector, and a collector-side sampling policy. Both are Phase 9-10 concerns
+(see ADR-014). No customer id is placed on spans — it is a pseudonymous
+personal identifier (doc 08 §3).
+
 ## Test
 
 ```bash
-mvn test        # unit tests only (no Docker needed)
-mvn verify      # full reactor: unit + integration tests (Testcontainers, requires Docker)
+./mvnw test        # unit tests only (no Docker needed)
+./mvnw verify      # full reactor: unit + integration tests (Testcontainers, requires Docker)
 ```
 
 Per-service integration tests boot each service against its own Testcontainers
