@@ -11,6 +11,22 @@ spring:
     open-in-view: false
   flyway:
     enabled: true
+  # Event backbone (Phase 6, ADR-004). inventory-service produces
+  # InventoryReserved/Released/Committed/Expired and consumes order.events to
+  # commit a reservation once the order is confirmed.
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+    consumer:
+      group-id: ${spring.application.name}
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      ack-mode: record
   security:
     oauth2:
       resourceserver:
@@ -36,3 +52,6 @@ ecommerce:
   inventory:
     reservation-ttl: ${RESERVATION_TTL:PT30M}
     expiry-interval-ms: ${EXPIRY_INTERVAL_MS:60000}
+  outbox:
+    poll-interval-ms: ${OUTBOX_POLL_INTERVAL_MS:1000}
+    batch-size: ${OUTBOX_BATCH_SIZE:100}

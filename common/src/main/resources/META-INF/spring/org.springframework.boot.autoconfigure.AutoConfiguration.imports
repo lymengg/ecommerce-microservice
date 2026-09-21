@@ -1,1 +1,2 @@
 com.ecommerce.common.tracing.TracingAutoConfiguration
+com.ecommerce.common.messaging.MessagingAutoConfiguration

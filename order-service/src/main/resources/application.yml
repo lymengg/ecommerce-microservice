@@ -11,6 +11,31 @@ spring:
     open-in-view: false
   flyway:
     enabled: true
+  # Event backbone (Phase 6, ADR-004). String serializers because the wire
+  # format is our own JSON envelope (doc 06 §1), serialized explicitly in the
+  # publisher — that keeps the contract visible in code rather than hidden in a
+  # serializer configuration.
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # all: the send is acknowledged only once every in-sync replica has it,
+      # so a broker failure right after ack cannot lose the event.
+      acks: all
+    consumer:
+      # Each capability gets its own group (doc 06 §10); listeners override this
+      # explicitly, so the default only matters if one forgets.
+      group-id: ${spring.application.name}
+      # A brand-new consumer group starts from the beginning rather than
+      # missing events that were published before it first ran.
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      # Commit the offset after each record, so the at-least-once window is one
+      # record wide — combined with idempotent consumers that is enough.
+      ack-mode: record
   security:
     oauth2:
       resourceserver:
@@ -34,6 +59,11 @@ server:
 
 ecommerce:
   tax-rate: ${TAX_RATE:0.10}
+  outbox:
+    # How often the publisher drains outbox_events to Kafka (ADR-009/015).
+    poll-interval-ms: ${OUTBOX_POLL_INTERVAL_MS:1000}
+    # Bounds the row lock held per publish cycle.
+    batch-size: ${OUTBOX_BATCH_SIZE:100}
   catalog:
     base-url: ${CATALOG_SERVICE_URL:http://localhost:8081}
   security:

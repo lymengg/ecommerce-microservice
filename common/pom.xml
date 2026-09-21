@@ -40,6 +40,16 @@
             <!-- optional: consumers with a database declare the starter themselves -->
             <optional>true</optional>
         </dependency>
+        <!-- Spring for Apache Kafka (Phase 6, ADR-004/015). Optional: only the
+             services that actually publish or consume events declare it, so
+             catalog/cart/checkout never open a broker connection. The messaging
+             auto-configuration is guarded by @ConditionalOnClass(KafkaTemplate)
+             and therefore activates only where this starter is present. -->
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+            <optional>true</optional>
+        </dependency>
 
         <dependency>
             <groupId>org.springframework.boot</groupId>

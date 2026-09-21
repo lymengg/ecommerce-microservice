@@ -19,6 +19,12 @@
             <groupId>com.ecommerce</groupId>
             <artifactId>common</artifactId>
         </dependency>
+        <!-- Spring for Apache Kafka (Phase 6, ADR-004/015): publishes the outbox
+             to the broker and consumes order events. -->
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
@@ -75,6 +81,12 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Real broker for the event tests — never a mocked one (doc 10 §3). -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>kafka</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

@@ -11,6 +11,15 @@ spring:
     open-in-view: false
   flyway:
     enabled: true
+  # Event backbone (Phase 6, ADR-004). payment-service is a producer only:
+  # its outbox is drained to payment.events, where order-service consumes
+  # PaymentSucceeded / PaymentFailed.
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
   security:
     oauth2:
       resourceserver:
@@ -35,6 +44,9 @@ server:
 ecommerce:
   payment:
     decline-above: ${DECLINE_ABOVE:10000}
+  outbox:
+    poll-interval-ms: ${OUTBOX_POLL_INTERVAL_MS:1000}
+    batch-size: ${OUTBOX_BATCH_SIZE:100}
   order:
     base-url: ${ORDER_SERVICE_URL:http://localhost:8084}
   security:
