@@ -12,6 +12,11 @@ import com.ecommerce.checkout.dto.CheckoutRequest;
 import com.ecommerce.checkout.dto.CheckoutResponse;
 import com.ecommerce.common.error.ConflictException;
 import com.ecommerce.common.error.InsufficientStockException;
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.context.Scope;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -27,6 +32,14 @@ import java.util.UUID;
  */
 @Service
 public class CheckoutService {
+
+    /**
+     * Resolved through {@link GlobalOpenTelemetry} so the tracer is the one the
+     * Java agent installed. With no agent attached this is a no-op tracer and
+     * every span call below is inert — the saga still works, it just is not
+     * traced, which is what keeps unit tests free of a tracing dependency.
+     */
+    private static final Tracer TRACER = GlobalOpenTelemetry.getTracer("com.ecommerce.checkout");
 
     private final CartClient cartClient;
     private final OrderClient orderClient;
@@ -44,6 +57,32 @@ public class CheckoutService {
     }
 
     public CheckoutResponse checkout(CheckoutRequest request, UUID customerId, String idempotencyKey) {
+        // One span for the whole saga. The agent already creates a server span for
+        // the inbound request; this child span is what makes the saga visible as a
+        // single unit with the cross-service calls nested beneath it.
+        //
+        // Deliberately no customer id attribute: it is a pseudonymous personal
+        // identifier and doc 08 §3 rules out sensitive data in spans. Cart and
+        // order ids are not personal.
+        Span span = TRACER.spanBuilder("checkout.saga")
+                .setAttribute("checkout.cart_id", request.cartId().toString())
+                .setAttribute("checkout.currency", request.currency())
+                .startSpan();
+        try (Scope ignored = span.makeCurrent()) {
+            return executeSaga(request, customerId, idempotencyKey, span);
+        } catch (RuntimeException ex) {
+            span.recordException(ex);
+            span.setStatus(StatusCode.ERROR, ex.getClass().getSimpleName());
+            throw ex;
+        } finally {
+            span.end();
+        }
+    }
+
+    private CheckoutResponse executeSaga(CheckoutRequest request,
+                                         UUID customerId,
+                                         String idempotencyKey,
+                                         Span span) {
         List<CartLineInfo> lines = cartClient.getLines(request.cartId());
         OrderCreateRequest orderRequest = new OrderCreateRequest(
                 customerId,
@@ -51,6 +90,7 @@ public class CheckoutService {
                 lines.stream().map(line -> new OrderCreateRequest.OrderLineRequest(line.productId(), line.quantity())).toList()
         );
         OrderInfo order = orderClient.createOrder(orderRequest, idempotencyKey);
+        span.setAttribute("checkout.order_id", order.orderId().toString());
 
         if ("DRAFT".equals(order.status())) {
             order = orderClient.markPending(order.orderId());
@@ -66,6 +106,7 @@ public class CheckoutService {
                 orderClient.markPaid(order.orderId());
                 cartClient.markCheckedOut(request.cartId());
             }
+            span.setAttribute("checkout.outcome", "PAID");
             return new CheckoutResponse(order.orderId(), payment.paymentId(), "PAID", payment.status());
         }
 
@@ -73,6 +114,7 @@ public class CheckoutService {
             inventoryClient.releaseByOrder(order.orderId());
             orderClient.cancel(order.orderId(), "PAYMENT_FAILED");
         }
+        span.setAttribute("checkout.outcome", "PAYMENT_DECLINED");
         throw new ConflictException("Checkout failed: payment declined");
     }
 

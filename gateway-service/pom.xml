@@ -25,6 +25,15 @@
             <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
         </dependency>
 
+        <!-- OTel API only (interfaces, no servlet or transport deps) so the
+             reactive correlation filter can tag the active span. The gateway
+             deliberately does not depend on `common`: that module pulls in
+             servlet Spring Web, which must never reach a reactive gateway. -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

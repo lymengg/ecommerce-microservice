@@ -1,5 +1,7 @@
 package com.ecommerce.common.client;
 
+import com.ecommerce.common.tracing.Correlation;
+import org.slf4j.MDC;
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
@@ -38,6 +40,21 @@ public final class RestClients {
     private static RestClient.Builder builder(String baseUrl) {
         return RestClient.builder()
                 .baseUrl(baseUrl)
-                .requestFactory(new HttpComponentsClientHttpRequestFactory());
+                .requestFactory(new HttpComponentsClientHttpRequestFactory())
+                .requestInterceptor((request, body, execution) -> {
+                    // Forward the edge correlation id so a single id covers the
+                    // whole saga. Without this every callee generates its own and
+                    // a user-quoted id only finds the first hop.
+                    //
+                    // Trace context propagates separately and automatically (the
+                    // OTel agent handles the traceparent header); this is the
+                    // human-facing support id, which tracing deliberately does
+                    // not replace.
+                    String correlationId = MDC.get(Correlation.MDC_KEY);
+                    if (correlationId != null && !correlationId.isBlank()) {
+                        request.getHeaders().set(Correlation.HEADER, correlationId);
+                    }
+                    return execution.execute(request, body);
+                });
     }
 }

@@ -27,6 +27,13 @@
             <groupId>org.apache.httpcomponents.client5</groupId>
             <artifactId>httpclient5</artifactId>
         </dependency>
+        <!-- OpenTelemetry API for manual instrumentation (CorrelationIdFilter,
+             the checkout saga span). The Java agent supplies the implementation
+             at runtime; without the agent these calls are no-ops. -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-jpa</artifactId>

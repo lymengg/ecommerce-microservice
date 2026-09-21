@@ -1,15 +1,25 @@
 # Project Progress — session handoff
 
-Last updated: 2026-09-20 (roadmap re-sequenced — see `docs/13-learning-roadmap.md`)
+Last updated: 2026-09-21 (Phase 5 tracing verified end-to-end; uncommitted)
 
-## Status: Phase 4 (Security) — DONE, `mvn -B verify` GREEN
+## Status: Phase 5 (Observability/tracing) — verified end-to-end, uncommitted
+
+Phase 4 is DONE. Phase 5 tracing is implemented and now verified against a live
+Jaeger with a real Keycloak token: one checkout produces a single trace across
+all seven services carrying one correlation id. The work is **uncommitted** —
+see "Phase 5 (tracing)" below for the state, the two bugs found on the way, and
+what remains.
+
+### Phase 4 record
 
 - `4dc3814` — feat: secure the platform with Keycloak/OAuth2, RBAC and
   ownership (Phase 4)
 - `980569a` — fix: harden Phase 4 verification findings
-- Full reactor `mvn -B verify` green with Docker: 113 tests (57 unit + 56
-  integration incl. Testcontainers PostgreSQL + a real Keycloak container).
-  `main` is in sync with `origin/main` (pushed).
+- Full reactor `mvn -B verify` green with Docker: 113 tests (the original note
+  said 57 unit + 56 integration; the unit count actually measures **62** today,
+  so 57 was wrong — integration count unverified since).
+- `main` is 3 commits ahead of `origin/main` (unpushed): the two docs commits
+  plus the Maven wrapper.
 
 ### What Phase 4 delivered
 - **Keycloak (ADR-005)** — realm `ecommerce` exported to
@@ -87,6 +97,126 @@ Manual end-to-end flow (documented in README.md "Manual checkout flow"):
    `Authorization: Bearer ...` → expect `PAID` + committed stock; a price
    > 10000 declines → expect `CANCELLED` + released stock.
 
+## Phase 5 (tracing) — implemented and verified, UNCOMMITTED
+
+Goal: make one request traceable across all seven services (doc 13 §3, Phase 5).
+The implementation works; it has **not been committed** (14 modified files + 2
+new paths). The "break it first" baseline in
+`docs/phase-5-tracing-baseline.md` was **skipped by request**, so there are no
+before/after numbers — the doc is still worth running against the instrumented
+system to see the contrast.
+
+### What is implemented
+
+- **Infrastructure** — `docker compose up -d jaeger otel-collector`.
+  Jaeger v2 (`jaegertracing/jaeger:2.20.0`, all-in-one, in-memory storage,
+  UI `:16686`) behind an OTel Collector
+  (`otel/opentelemetry-collector-contrib:0.160.0`), config in
+  `infra/otel/otel-collector-config.yaml`. Collector ports are bound to
+  `127.0.0.1` so only this machine can inject telemetry. The collector is the
+  single ingestion point, which is what lets Phase 8 swap Jaeger for Tempo
+  without touching a service.
+- **Agent** — OpenTelemetry Java agent **2.31.1**, pinned by
+  `otel.agent.version` in the parent pom and fetched into `otel/` (gitignored)
+  by a `maven-dependency-plugin` copy bound to `validate` (`inherited=false`,
+  so only the root project copies it). Attached via
+  `spring-boot-maven-plugin` `jvmArguments` in the parent's `pluginManagement`:
+  `spring-boot:run` is instrumented, surefire/failsafe are not, so unit tests
+  stay agent-free and fast. `-Dotel.service.name=${project.artifactId}`
+  resolves per module.
+- **Log correlation** — `logging.pattern.console` in all seven services emits
+  `[trace=…,span=…,corr=…]`. The agent's Logback instrumentation supplies
+  trace_id/span_id automatically.
+- **Correlation id** — kept as the client-facing support id (ADR-014).
+  `common` gains `com.ecommerce.common.tracing.Correlation` (shared constants)
+  and `CorrelationIdFilter`, registered by `TracingAutoConfiguration` through
+  `META-INF/spring/...AutoConfiguration.imports` — deliberately
+  auto-configured rather than component-scanned, because checkout-service scans
+  selectively and would silently miss it (the trap that left it unsecured
+  pre-Phase 4). The filter puts the id in MDC, on the active span
+  (`ecommerce.correlation_id`) and echoes it on the response. The gateway sets
+  the span attribute in its existing reactive filter; it does **not** depend on
+  `common` because that would drag servlet Spring Web into a reactive app, so
+  the two header constants are duplicated with a sync comment.
+- **Manual span** — `checkout.saga` in `CheckoutService` wraps the whole saga
+  in a child span with `checkout.cart_id`, `checkout.currency`,
+  `checkout.order_id` and `checkout.outcome`. Deliberately **no customer id**:
+  it is a pseudonymous personal identifier (doc 08 §3).
+- `opentelemetry-api` added to `common` and `gateway-service` (API only — the
+  agent supplies the implementation, and every call is a no-op without it).
+
+### Verified working (2026-09-21, full stack)
+
+- `./mvnw -B test` → BUILD SUCCESS, **62 unit tests**, all 8 modules.
+- Synthetic OTLP span → collector → Jaeger query API.
+- **Full checkout saga end to end**, through the gateway, with a real Keycloak
+  token: `POST /api/v1/checkout` → `orderStatus=PAID`,
+  `paymentStatus=SUCCEEDED`. The resulting trace has **201 spans across all
+  seven services** (`gateway, catalog, cart, inventory, order, payment,
+  checkout`) and carries **exactly one correlation id** — the one supplied at
+  the edge — proving end-to-end propagation.
+- **Log line → trace id → Jaeger trace**, with `[trace=…,span=…,corr=…]` all
+  populated on request-handling lines.
+- `ecommerce.correlation_id` present as a span attribute on every service hop.
+
+### Resolved (2026-09-21): the "empty corr=" was a misdiagnosis
+
+`corr=` is **not** broken. The earlier conclusion came from reading
+DispatcherServlet *initialisation* lines, which legitimately carry no
+correlation id: Tomcat's `StandardWrapperValve` calls `servlet.init()`
+**before** the filter chain runs, so those lines are emitted before
+`CorrelationIdFilter` executes at all. They still carry trace/span because the
+agent's span starts one level higher, at the valve.
+
+Confirmed by temporarily instrumenting the filter: a log line emitted inside it
+renders `[trace=…,span=…,corr=corr-probe-777]` — all three populated. The
+agent's `LoggingEventInstrumentation` explicitly copies the existing MDC map
+(`spanContextData.putAll(contextData)`) before adding trace_id/span_id, so
+custom MDC keys survive. The earlier claim in this file that it "drops other
+MDC entries" was wrong. Diagnostic logging was removed again after the check.
+
+### Two real bugs found while verifying
+
+Neither was a tracing problem; both blocked the end-to-end run.
+
+1. **Keycloak realm omitted the `basic` client scope, so access tokens carried
+   no `sub` claim.** All three clients listed
+   `defaultClientScopes: ["web-origins", "acr", "profile", "roles", "email"]`
+   with no `basic`, and the realm defined no `defaultDefaultClientScopes`
+   fallback. Keycloak's `basic` scope is what supplies `sub`. Every service
+   derives the customer from `sub`, so `SecurityUtils.currentCustomerId()`
+   returned null and **every authenticated business call returned 403** —
+   including `GET /api/v1/cart` with a valid `CUSTOMER` token. Phase 4 never
+   caught it because the mocked-JWT ITs inject authorities directly and
+   `GatewayKeycloakIT` only exercises the gateway, so **no servlet service was
+   ever driven with a real Keycloak token**. Fixed by adding `"basic"` to each
+   client's `defaultClientScopes` in `infra/keycloak/ecommerce-realm.json`.
+   Re-import needs a **fresh** Keycloak container
+   (`docker compose rm -sf keycloak && docker compose up -d keycloak`) —
+   `--import-realm` skips a realm that already exists.
+2. **The correlation id was not forwarded on service-to-service calls.** The
+   gateway sets `X-Correlation-Id`, but `RestClients` had no interceptor for it,
+   so each callee generated its own and a user-quoted id found only the first
+   hop. Fixed by forwarding `MDC.get(Correlation.MDC_KEY)` in the shared
+   `RestClients` builder, so both `create` and `createWithServiceToken` clients
+   propagate it. Verified: the same trace went from many distinct correlation
+   ids to exactly one.
+
+### Not done yet (rest of Phase 5)
+
+- A test asserting downstream calls carry `traceparent` / the correlation header.
+- ADR-014, README run/verify updates.
+- Re-run `docs/phase-5-tracing-baseline.md` to fill the "After tracing" columns.
+
+### Run / verify recipe
+
+```bash
+docker compose up -d keycloak jaeger otel-collector
+./mvnw install -DskipTests        # see gotcha: -pl <service> alone cannot resolve common
+./mvnw -pl checkout-service spring-boot:run
+# Jaeger UI: http://localhost:16686
+```
+
 ## Environment gotchas (learned the hard way — read before running)
 - **Port 5432 is taken by a local Windows PostgreSQL.** Start the Docker
   Postgres on a different host port and pass it to every service:
@@ -145,6 +275,73 @@ Manual end-to-end flow (documented in README.md "Manual checkout flow"):
   `refreshTokenMaxReuse` are rejected by the importer in 26.7 (rotation is
   the default); `serviceAccountClientId` users with `realmRoles` import
   correctly (verified by `GatewayKeycloakIT.realmImportCreatesUsersAndRoles`).
+- **Clients MUST list `basic` in `defaultClientScopes`, or access tokens have
+  no `sub` claim.** Keycloak's `basic` client scope is what supplies `sub`;
+  omitting it silently produces tokens that validate fine (401 never fires) but
+  carry no subject, so every service that derives identity from `sub` returns
+  403. Declaring `defaultClientScopes` on a client overrides the realm default,
+  so the scope has to be listed explicitly. Symptom to recognise: token decodes
+  with `scope: "email profile"` and no `sub` key.
+- **`--import-realm` skips a realm that already exists.** Editing
+  `infra/keycloak/ecommerce-realm.json` has no effect until the container is
+  recreated: `docker compose rm -sf keycloak && docker compose up -d keycloak`.
+
+### Workstation setup (Windows, cost hours on 2026-09-20 — read first)
+
+- **Docker Desktop is a per-user install**: `%LOCALAPPDATA%\Programs\DockerDesktop`,
+  not `C:\Program Files\Docker`. A `where docker` or Program Files check misses
+  it entirely and makes it look uninstalled.
+- **The real signal for a Docker/WSL start failure is `HypervisorPresent`**, not
+  the error text:
+  `Get-CimInstance Win32_ComputerSystem | Select HypervisorPresent` must be
+  `True`. Docker's "virtualisation support wasn't detected" is misleading —
+  firmware VT-x was already enabled (`VirtualizationFirmwareEnabled: True`); the
+  missing piece was the WSL2 hypervisor. `wsl --install` also fails on Windows 11
+  build 26200 with `Wsl/CallMsi/Install/REGDB_E_CLASSNOTREG` ("Class not
+  registered"); the working fixes are the official triage script
+  (`https://raw.githubusercontent.com/microsoft/WSL/master/triage/install-latest-wsl.ps1`)
+  or installing the WSL MSI directly. Do **not** run the `regsvr32`-every-DLL
+  "fix" that circulates in those threads.
+- **Maven is not in winget** — `Apache.Maven` does not exist (only unrelated
+  Minecraft packages match). Use Scoop: `scoop install main/maven`. Scoop also
+  covers the later phases' CLI tools (kubectl, helm, terraform, k6, trivy).
+- **Quote `-Dmaven=…` on PowerShell.** `mvn wrapper:wrapper -Dmaven=3.9.16` is
+  parsed as `-Dmaven=3`, which writes a broken
+  `distributionUrl=…/apache-maven/3/apache-maven-3-bin.zip` into
+  `maven-wrapper.properties`. The command exits non-zero but **has already
+  written the files**, so it is easy to miss. Inspect the properties file after
+  generating the wrapper.
+- **`mvnw` needs its executable bit set explicitly on Windows** — this checkout
+  has `core.filemode=false`, so Git will not record it and Linux CI fails with
+  "Permission denied" while everything works locally. Fix:
+  `git update-index --chmod=+x mvnw` (confirm with `git ls-files -s mvnw` →
+  `100755`).
+- **`dependency:copy` has no `destFileName` or `overWrite` parameter** in
+  maven-dependency-plugin 3.8.1 — both are silently ignored (with a WARNING)
+  and the artifact lands under its versioned name. Use `<stripVersion>true</stripVersion>`
+  to get a stable filename.
+- **The OTel Java agent defaults to `http/protobuf`, not gRPC.** With
+  `otel.exporter.otlp.endpoint=http://localhost:4317` it warns that 4317 is the
+  gRPC port and then **fails to export silently** — no error in the app log and
+  nothing in Jaeger. Always set `-Dotel.exporter.otlp.protocol=grpc` (or point
+  the endpoint at 4318).
+- **Collector 0.160.0 deprecated the bare `otlp` exporter alias** — use
+  `otlp_grpc` / `otlp_http`, otherwise the collector logs a deprecation warning
+  on every start.
+- **`./mvnw -pl <service> spring-boot:run` fails on a clean clone**: the module
+  cannot resolve `com.ecommerce:common`, because `mvn package` never installs it.
+  Run `./mvnw install -DskipTests` first. The README's run section says
+  `mvn -B package`, which is not sufficient.
+- **Empty `corr=` on early log lines is not a bug.** Tomcat initialises the
+  servlet *before* running the filter chain, so the `DispatcherServlet -
+  Initializing Servlet` lines are emitted before any filter — including the
+  correlation filter — has run. They still show trace/span, because the agent's
+  span starts higher up at the Tomcat valve. Judge MDC by a line emitted during
+  request handling, not by servlet initialisation.
+- **The OTel agent preserves custom MDC keys.** `LoggingEventInstrumentation`
+  copies the event's existing MDC map before adding `trace_id`/`span_id`/
+  `trace_flags`, so `%X{correlationId}` works alongside them. (Verified by
+  instrumenting the filter: one line rendered trace, span *and* corr together.)
 
 ## Next phases (docs/13-learning-roadmap.md)
 

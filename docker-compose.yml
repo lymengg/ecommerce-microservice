@@ -6,8 +6,11 @@
 # local environment.
 #
 # Usage:
-#   docker compose up -d keycloak
+#   docker compose up -d keycloak jaeger otel-collector
 #   # then start services with KEYCLOAK_ISSUER_URI=http://localhost:8087/realms/ecommerce
+#
+# Tracing (Phase 5): services export OTLP to otel-collector, which forwards to
+# Jaeger. Jaeger UI: http://localhost:16686
 services:
   keycloak:
     image: quay.io/keycloak/keycloak:26.7.4
@@ -25,3 +28,28 @@ services:
       timeout: 5s
       retries: 20
       start_period: 30s
+
+  # Jaeger v2 — trace storage and UI. The image defaults to an all-in-one
+  # process with transient in-memory storage, so no config file is needed.
+  # Only the UI port is published: OTLP ingestion is the collector's job, and
+  # a single ingestion point is what keeps the backend swappable (Phase 8
+  # replaces this with Tempo without any service change).
+  jaeger:
+    image: jaegertracing/jaeger:2.20.0
+    ports:
+      - "127.0.0.1:16686:16686"
+
+  # OpenTelemetry Collector — the single ingestion point for all telemetry.
+  # Ports are bound to 127.0.0.1 so only this machine can inject spans; the
+  # defaults (0.0.0.0) would expose ingestion to the whole network.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.160.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./infra/otel/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"    # OTLP/gRPC — used by the Java agent
+      - "127.0.0.1:4318:4318"    # OTLP/HTTP — curl and manual debugging
+      - "127.0.0.1:13133:13133"  # health_check extension
+    depends_on:
+      - jaeger

@@ -34,6 +34,7 @@
         <springdoc.version>2.8.17</springdoc.version>
         <spring-cloud.version>2025.0.0</spring-cloud.version>
         <wiremock.version>3.9.1</wiremock.version>
+        <otel.agent.version>2.31.1</otel.agent.version>
     </properties>
 
     <dependencyManagement>
@@ -54,6 +55,29 @@
     </dependencyManagement>
 
     <build>
+        <pluginManagement>
+            <plugins>
+                <!-- Tracing (Phase 5, ADR-014). Attaches the pinned OpenTelemetry
+                     Java agent to `mvn spring-boot:run`.
+
+                     The agent does bytecode instrumentation, so it also handles
+                     context propagation (Apache HttpClient 5) and log correlation
+                     (Logback MDC) with no application code. -Dotel.service.name
+                     resolves per module, so each service reports its artifactId.
+
+                     Note this only affects `spring-boot:run`: surefire and
+                     failsafe fork their own JVMs, so unit and integration tests
+                     run without the agent and stay fast. -->
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                    <configuration>
+                        <jvmArguments>-javaagent:${maven.multiModuleProjectDirectory}/otel/opentelemetry-javaagent.jar -Dotel.service.name=${project.artifactId} -Dotel.exporter.otlp.endpoint=http://localhost:4317 -Dotel.exporter.otlp.protocol=grpc -Dotel.traces.exporter=otlp -Dotel.metrics.exporter=none -Dotel.logs.exporter=none -Dotel.propagators=tracecontext,baggage -Dotel.traces.sampler=parentbased_always_on -Dotel.resource.attributes=deployment.environment=local</jvmArguments>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -64,6 +88,38 @@
                             <goal>integration-test</goal>
                             <goal>verify</goal>
                         </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Fetches the pinned OpenTelemetry Java agent into otel/ at the repo
+                 root, so the agent version is part of the build rather than a
+                 manual download. `inherited=false` keeps it to the root project:
+                 otherwise all seven services would copy the same ~20 MB jar.
+
+                 Because this is phase-bound, running a single service straight
+                 from a clean clone needs a root build first (`./mvnw -N validate`).
+                 See README "Run (full stack locally)". -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <inherited>false</inherited>
+                <executions>
+                    <execution>
+                        <id>fetch-otel-javaagent</id>
+                        <phase>validate</phase>
+                        <goals>
+                            <goal>copy</goal>
+                        </goals>
+                        <configuration>
+                            <artifact>io.opentelemetry.javaagent:opentelemetry-javaagent:${otel.agent.version}</artifact>
+                            <outputDirectory>${maven.multiModuleProjectDirectory}/otel</outputDirectory>
+                            <!-- stripVersion yields opentelemetry-javaagent.jar,
+                                 which is the stable path the -javaagent argument
+                                 above points at. dependency:copy has no
+                                 destFileName parameter. -->
+                            <stripVersion>true</stripVersion>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
