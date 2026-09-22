@@ -251,12 +251,32 @@ public class ResilienceProperties {
         private int permittedNumberOfCallsInHalfOpenState = 3;
 
         /**
-         * Slow-call detection. The rate threshold is left at 100% (i.e. off) on
-         * purpose: the response timeout already bounds latency, and a slow-call
-         * rule on top of it would open breakers for work that completed.
+         * Slow-call detection, left at Resilience4j's own default (60 s) on
+         * purpose — which, given every dependency's response timeout is at most
+         * 3 s, means it can never fire.
+         *
+         * <p><b>Do not lower this below a dependency's response timeout.</b> A
+         * call that *succeeded* can never take longer than its response timeout,
+         * so a threshold below it does not detect a broken dependency — it
+         * detects a *working* one, and opens the circuit on it. Phase 7 shipped
+         * this set to 2 s, and the Phase 8 baseline measured the consequence: a
+         * legitimate 2.2 s provider call (well inside its own 3 s timeout and
+         * the 10 s saga budget) turned into a 45 % checkout error rate, because
+         * every call was "slow" and the rate threshold below is a percentage
+         * that 100 % satisfies. See docs/phase-8-observability-baseline.md §3.
+         *
+         * <p>A latency regression should page a human — a symptom alert on p95 —
+         * not deny service to a dependency that is answering correctly. Per-call
+         * response timeouts and the saga deadline already bound latency.
          */
-        private Duration slowCallDurationThreshold = Duration.ofSeconds(2);
+        private Duration slowCallDurationThreshold = Duration.ofSeconds(60);
 
+        /**
+         * Percentage of slow calls that opens the breaker. Only meaningful
+         * together with {@link #slowCallDurationThreshold} above; 100 means "only
+         * if every call is slow", which is *reachable* and therefore not the
+         * same as "disabled".
+         */
         private float slowCallRateThreshold = 100f;
 
         public int getSlidingWindowSize() {

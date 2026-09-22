@@ -271,6 +271,71 @@ class ResilientRestClientTest {
         assertThat(good.get().uri("/ok").retrieve().toBodilessEntity().getStatusCode().value()).isEqualTo(200);
     }
 
+    /**
+     * A dependency that is slow but answering correctly must not open the
+     * circuit. This is the Phase 8 baseline's finding, pinned: a legitimate
+     * 2.2 s provider call (inside its own 3 s timeout) produced a 45 % checkout
+     * error rate, because slow-call detection was configured below the response
+     * timeout and every call was therefore "slow".
+     */
+    @Test
+    void aSlowButSuccessfulCallDoesNotOpenTheBreaker() {
+        ResilienceProperties properties = new ResilienceProperties();
+        properties.getHttp().setResponseTimeout(Duration.ofSeconds(1));
+        properties.getRetry().setMaxAttempts(1);
+        properties.getCircuitBreaker().setSlidingWindowSize(10);
+        properties.getCircuitBreaker().setMinimumNumberOfCalls(5);
+        properties.getCircuitBreaker().setFailureRateThreshold(50f);
+        ClientResilienceFactory factory = new ClientResilienceFactory(properties);
+
+        handlerDelay = Duration.ofMillis(400);
+        RestClient client = client(factory, "payment");
+
+        for (int i = 0; i < 6; i++) {
+            assertThat(client.get().uri("/dep").retrieve().toBodilessEntity().getStatusCode().value())
+                    .as("slow, but successful")
+                    .isEqualTo(200);
+        }
+
+        assertThat(factory.forDependency("payment").circuitBreaker().getState())
+                .as("slowness is an SLO symptom, not a reason to deny service")
+                .isEqualTo(CircuitBreaker.State.CLOSED);
+    }
+
+    /**
+     * The mechanism behind that bug, demonstrated deliberately: with the
+     * slow-call threshold below the response timeout, calls that *succeed* are
+     * counted as failures and the breaker opens. This is why the default is
+     * Resilience4j's 60 s and why lowering it is documented as a trap.
+     */
+    @Test
+    void aSlowCallThresholdBelowTheResponseTimeoutConvertsLatencyIntoErrors() {
+        ResilienceProperties properties = new ResilienceProperties();
+        properties.getHttp().setResponseTimeout(Duration.ofSeconds(2));
+        properties.getRetry().setMaxAttempts(1);
+        properties.getCircuitBreaker().setSlidingWindowSize(8);
+        properties.getCircuitBreaker().setMinimumNumberOfCalls(4);
+        properties.getCircuitBreaker().setFailureRateThreshold(50f);
+        properties.getCircuitBreaker().setSlowCallDurationThreshold(Duration.ofMillis(100));
+        properties.getCircuitBreaker().setSlowCallRateThreshold(100f);
+        ClientResilienceFactory factory = new ClientResilienceFactory(properties);
+
+        handlerDelay = Duration.ofMillis(200);
+        RestClient client = client(factory, "payment");
+
+        for (int i = 0; i < 5; i++) {
+            try {
+                client.get().uri("/dep").retrieve().toBodilessEntity();
+            } catch (Exception ignored) {
+                // not expected: every one of these calls succeeds
+            }
+        }
+
+        assertThat(factory.forDependency("payment").circuitBreaker().getState())
+                .as("100% is a reachable rate, not the same as disabled")
+                .isEqualTo(CircuitBreaker.State.OPEN);
+    }
+
     // --- 7c: bulkheads ----------------------------------------------------
 
     @Test
