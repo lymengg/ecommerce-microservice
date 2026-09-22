@@ -72,7 +72,31 @@
                     <groupId>org.springframework.boot</groupId>
                     <artifactId>spring-boot-maven-plugin</artifactId>
                     <configuration>
-                        <jvmArguments>-javaagent:${maven.multiModuleProjectDirectory}/otel/opentelemetry-javaagent.jar -Dotel.service.name=${project.artifactId} -Dotel.exporter.otlp.endpoint=http://localhost:4317 -Dotel.exporter.otlp.protocol=grpc -Dotel.traces.exporter=otlp -Dotel.metrics.exporter=none -Dotel.logs.exporter=none -Dotel.propagators=tracecontext,baggage -Dotel.traces.sampler=parentbased_always_on -Dotel.resource.attributes=deployment.environment=local</jvmArguments>
+                        <!-- Metrics are deliberately NOT exported over OTLP
+                             (`otel.metrics.exporter=none`): Phase 8 scrapes each
+                             service's Prometheus endpoint instead. Two metric
+                             paths would mean two sets of series for the same
+                             thing, and Prometheus pull is the model the
+                             dashboards and alert rules are written against.
+                             Traces and logs are pushed, because a pull model for
+                             those needs a backend that can be scraped.
+
+                             service.instance.id is pinned to the artifactId
+                             rather than left to the agent's random per-JVM UUID.
+                             Loki indexes it as a stream label, so a random value
+                             creates a new stream on every restart — and Loki
+                             will synthesise one if it is missing, which is worse
+                             because the synthesised value is stable only within
+                             a stream. One replica per service in development, so
+                             the artifactId is the honest stable identity.
+
+                             Logs go to the collector as OTLP records rather than
+                             as JSON text on stdout (ADR-021): the console stays
+                             human-readable, the collector stays the single
+                             ingestion point, and the agent already has the
+                             trace_id/span_id in hand — which is what lets Loki
+                             jump straight to the matching trace. -->
+                        <jvmArguments>-javaagent:${maven.multiModuleProjectDirectory}/otel/opentelemetry-javaagent.jar -Dotel.service.name=${project.artifactId} -Dotel.exporter.otlp.endpoint=http://localhost:4317 -Dotel.exporter.otlp.protocol=grpc -Dotel.traces.exporter=otlp -Dotel.metrics.exporter=none -Dotel.logs.exporter=otlp -Dotel.instrumentation.logback-appender.experimental.capture-mdc-attributes=* -Dotel.propagators=tracecontext,baggage -Dotel.traces.sampler=parentbased_always_on -Dotel.resource.attributes=deployment.environment=local,service.instance.id=${project.artifactId}</jvmArguments>
                     </configuration>
                 </plugin>
             </plugins>
