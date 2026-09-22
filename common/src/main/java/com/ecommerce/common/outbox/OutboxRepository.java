@@ -4,6 +4,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
@@ -31,4 +32,16 @@ public interface OutboxRepository extends JpaRepository<OutboxEvent, UUID> {
     List<OutboxEvent> lockUnpublishedBatch(@Param("batchSize") int batchSize);
 
     long countByPublishedAtIsNull();
+
+    /**
+     * The {@code occurred_at} of the oldest event still waiting to be published,
+     * or {@code null} when the outbox is drained.
+     *
+     * <p>Phase 8 (ADR-021) uses this for the age of the backlog, which is a
+     * better alerting signal than the count: a backlog of 5 is normal under load
+     * and a backlog of 1 is an incident if that one row has been stuck for an
+     * hour. The count cannot tell those apart.
+     */
+    @Query("SELECT MIN(o.occurredAt) FROM OutboxEvent o WHERE o.publishedAt IS NULL")
+    Instant oldestUnpublishedOccurredAt();
 }

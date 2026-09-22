@@ -6,6 +6,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplicat
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
@@ -46,7 +47,19 @@ public class ServiceSecurityConfig {
                 .csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> {
-                    auth.requestMatchers("/actuator/health", "/actuator/info").permitAll();
+                    // Phase 8 (ADR-021). The probes and the metrics endpoint are
+                    // unauthenticated on purpose: Kubernetes and Prometheus both
+                    // have to reach them without a user token, and a health check
+                    // that needs OAuth is a health check that cannot be relied on
+                    // during an identity-provider outage — precisely when you
+                    // need it. Everything else under /actuator is NOT exposed
+                    // (see management.endpoints.web.exposure.include), and the
+                    // gateway denies unknown paths, so these are reachable only
+                    // from inside the network. Putting them on a separate
+                    // management port is the hardening step; it is deferred with
+                    // the rest of the network work (docs/09 §6, Phase 10).
+                    auth.requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info").permitAll();
+                    auth.requestMatchers(HttpMethod.GET, "/actuator/prometheus").permitAll();
                     auth.requestMatchers("/error").permitAll();
                     securityProperties.permitAllMatchers()
                             .forEach(matcher -> auth.requestMatchers(matcher).permitAll());

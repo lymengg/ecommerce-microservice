@@ -5,29 +5,30 @@ import io.github.resilience4j.micrometer.tagged.TaggedCircuitBreakerMetrics;
 import io.github.resilience4j.micrometer.tagged.TaggedRetryMetrics;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.context.annotation.Bean;
 
 /**
- * Binds breaker state, retry counts and bulkhead saturation to Micrometer.
+ * Binds breaker state, retry counts and bulkhead saturation to Micrometer — the
+ * signal doc 08 §4 asks for and Phase 7 deliberately left dormant.
  *
- * <p>Dormant today: no service has Actuator or a {@code MeterRegistry} yet, so
- * both conditions are false and nothing is created. It exists so that Phase 8's
- * Prometheus wiring surfaces the resilience signals doc 08 §4 asks for without
- * this phase reaching into the metrics stack — the split the roadmap
- * deliberately makes.
+ * <p>Guarded by class-name conditions because {@code resilience4j-micrometer} is
+ * optional: the auto-configuration is skipped, not failed, when it is absent.
  *
- * <p>Guarded by class-name conditions because {@code resilience4j-micrometer}
- * and micrometer are optional: the auto-configuration is skipped, not failed,
- * when they are absent.
+ * <p>Note there is no {@code @ConditionalOnBean(MeterRegistry.class)} here, and
+ * that is not an oversight. A {@code @ConditionalOnBean} only sees bean
+ * definitions registered by *earlier* configurations, and the registry is
+ * contributed by Boot's own metrics auto-configuration — so the condition was
+ * evaluated too early and silently produced no beans at all. The metrics were
+ * simply absent, with nothing in the log to say why. Injecting the registry
+ * directly sidesteps the ordering question entirely: by the time a bean is
+ * instantiated, every definition exists.
  */
 @AutoConfiguration(after = ResilienceAutoConfiguration.class)
 @ConditionalOnClass(name = {
         "io.micrometer.core.instrument.MeterRegistry",
         "io.github.resilience4j.micrometer.tagged.TaggedCircuitBreakerMetrics"
 })
-@ConditionalOnBean(type = "io.micrometer.core.instrument.MeterRegistry")
 public class ResilienceMetricsAutoConfiguration {
 
     @Bean

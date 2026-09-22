@@ -43,7 +43,13 @@ public class GatewaySecurityConfig {
                 .authorizeExchange(exchange -> exchange
                         // CORS preflight must pass before the gateway CORS handler answers it
                         .pathMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-                        .pathMatchers("/actuator/health").permitAll()
+                        // Phase 8 (ADR-021): the probes and the metrics endpoint
+                        // must be reachable without a token, or Prometheus cannot
+                        // scrape the edge and a health check cannot be trusted
+                        // during an identity-provider outage. Same reasoning as
+                        // the services' SecurityFilterChain.
+                        .pathMatchers("/actuator/health", "/actuator/health/**", "/actuator/info").permitAll()
+                        .pathMatchers(HttpMethod.GET, "/actuator/prometheus").permitAll()
                         .pathMatchers(HttpMethod.GET, "/api/v1/products/**").permitAll()
                         .pathMatchers("/api/v1/products/**").hasRole("ADMIN")
                         // provider webhooks carry signatures, not OAuth2 tokens

@@ -46,14 +46,34 @@
             <groupId>io.github.resilience4j</groupId>
             <artifactId>resilience4j-bulkhead</artifactId>
         </dependency>
-        <!-- Optional: binds breaker/retry/bulkhead metrics to a Micrometer
-             registry when one is present. No service has Actuator yet (Phase 8
-             adds it), so this is inert today and lights up automatically once a
-             MeterRegistry exists. -->
+        <!-- Binds breaker/retry/bulkhead metrics to the Micrometer registry
+             (Phase 8, ADR-021). No longer optional: Actuator and the Prometheus
+             registry below are now on every servlet service's classpath, so
+             there is always a registry to bind to. -->
         <dependency>
             <groupId>io.github.resilience4j</groupId>
             <artifactId>resilience4j-micrometer</artifactId>
-            <optional>true</optional>
+        </dependency>
+
+        <!-- Observability (Phase 8, ADR-021). Deliberately declared here rather
+             than in each service: a service that forgot Actuator would silently
+             have no metrics at all — the same class of gap as the pre-Phase-4
+             security hole, where a service that forgot a component simply was
+             not secured. Observability is not optional per service.
+             micrometer-core is what ApplicationMetrics and the custom gauges
+             compile against, so it is declared explicitly rather than relied on
+             transitively. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
         </dependency>
         <!-- OpenTelemetry API for manual instrumentation (CorrelationIdFilter,
              the checkout saga span). The Java agent supplies the implementation

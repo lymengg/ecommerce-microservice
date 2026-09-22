@@ -34,6 +34,19 @@
             <artifactId>opentelemetry-api</artifactId>
         </dependency>
 
+        <!-- Observability (Phase 8, ADR-021). The gateway cannot inherit these
+             from `common`, so it declares them itself. Without them the edge
+             would be the one hop with no metrics — and the edge is where
+             request rate and error rate are most worth watching. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

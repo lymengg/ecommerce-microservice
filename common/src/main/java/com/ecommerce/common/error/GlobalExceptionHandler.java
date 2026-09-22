@@ -6,6 +6,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.net.URI;
 
@@ -71,6 +72,24 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(AccessDeniedException.class)
     public void handleAccessDenied(AccessDeniedException ex) throws AccessDeniedException {
         throw ex;
+    }
+
+    /**
+     * A path that does not exist is a 404, not a 500.
+     *
+     * <p>Found while probing actuator paths in Phase 8: Spring MVC 6 throws
+     * {@code NoResourceFoundException} for an unmapped path, and the catch-all
+     * handler below turned it into "Unexpected server error". That is wrong in
+     * two ways — it misleads a caller, and it corrupts monitoring, because a
+     * typo'd URL becomes an error-rate spike on a service that is perfectly
+     * healthy.
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ProblemDetail handleNoResource(NoResourceFoundException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, "No such resource");
+        problem.setTitle("Not Found");
+        problem.setType(URI.create("urn:problem:not-found"));
+        return problem;
     }
 
     @ExceptionHandler(Exception.class)

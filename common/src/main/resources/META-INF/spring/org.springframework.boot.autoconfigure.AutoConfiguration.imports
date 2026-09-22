@@ -2,3 +2,6 @@ com.ecommerce.common.tracing.TracingAutoConfiguration
 com.ecommerce.common.messaging.MessagingAutoConfiguration
 com.ecommerce.common.resilience.ResilienceAutoConfiguration
 com.ecommerce.common.resilience.ResilienceMetricsAutoConfiguration
+com.ecommerce.common.observability.ObservabilityAutoConfiguration
+com.ecommerce.common.observability.OutboxMetricsAutoConfiguration
+com.ecommerce.common.observability.KafkaLagMetricsAutoConfiguration
