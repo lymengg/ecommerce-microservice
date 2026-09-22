@@ -80,14 +80,15 @@ Introduce database-per-service.
 - Reconciliation ✅ (scheduled job in order-service; completes or compensates
   stranded orders, bounded, terminal `NEEDS_ATTENTION`)
 
-## Phase 7 — Observability
-- OpenTelemetry
-- Prometheus
-- Grafana
-- Loki
-- Tempo/Jaeger
-- Dashboards
-- Alerts
+## Phase 7 — Observability ✅ (delivered as "Phase 8 — Observability: metrics, logs, alerts" in the revised plan, docs/13; ADR-021, ADR-022)
+- OpenTelemetry ✅ (traces and logs over OTLP; metrics via Prometheus pull)
+- Prometheus ✅ (each service's `/actuator/prometheus`, plus the collector's own)
+- Grafana ✅ (two provisioned dashboards; Prometheus + Loki + Jaeger datasources)
+- Loki ✅ (logs ingested over OTLP via the collector, `trace_id` attached)
+- Tempo/Jaeger ✅ (Jaeger; the collector is the swap point for Tempo)
+- Dashboards ✅
+- Alerts ✅ (eleven symptom-based rules, unit tested with `promtool`, proved by
+  degrading the live system)
 
 ## Phase 8 — Containerization
 - Dockerfiles

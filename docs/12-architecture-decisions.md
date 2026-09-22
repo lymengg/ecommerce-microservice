@@ -592,3 +592,199 @@ is what Loki will pick up in Phase 8; the counters Phase 8 exports come from the
 same call sites.
 
 **Status:** Accepted, Phase 7.
+
+## ADR-021: The Observability Stack — Metrics Pulled, Logs Pushed
+
+**Decision.** Prometheus scrapes each service's `/actuator/prometheus`;
+traces and logs are **pushed** over OTLP to the collector, which forwards traces
+to Jaeger and logs to Loki; Grafana reads all three. Dashboards, datasources and
+alert rules are **provisioned from files in the repository**. Actuator and the
+Prometheus registry are dependencies of `common`, so every servlet service is
+instrumented whether or not anyone remembered.
+
+**Why metrics are pulled and logs/traces are pushed.** They are different shapes
+of data with different costs. A metric is a small, fixed-size, time-series fact
+that is cheap to fetch on a schedule and cheap to re-fetch; a pull model makes
+the scrape itself a health signal (`up`), which is the only way to observe a
+service being *absent* — a dead service exports nothing, so no application-emitted
+label can express "this service is gone". Logs and traces are large, bursty and
+per-event: pulling them would need an endpoint that holds data until asked for,
+which is just a worse queue. So the agent pushes those over the one OTLP
+connection it already has.
+
+That is also why the OpenTelemetry agent is configured `otel.metrics.exporter=none`.
+Exporting metrics over OTLP *as well* would produce two series for every
+measurement, and a dashboard would silently disagree with an alert about the same
+system.
+
+**Why Actuator lives in `common` rather than in each service.** The same argument
+as `ServiceSecurityConfig`: a service that forgot the dependency would silently
+have no metrics at all, and the failure is invisible — an empty dashboard looks
+like a healthy system with no traffic. This project has already been bitten once
+by a shared component that a selective component scan did not reach (checkout was
+unsecured until Phase 4), and observability is exactly the same shape of risk.
+`gateway-service` cannot depend on `common`, so it declares Actuator itself.
+
+**Service identity comes from the scrape configuration, not from the
+application.** The `service` label is attached by `prometheus.yml`, not emitted
+by the app. Two reasons: a service that is down emits no metrics at all, so an
+app-emitted label cannot be used to detect its absence; and the scrape label is
+guaranteed to be consistent across every metric a service produces, including the
+JVM and pool metrics that Micrometer adds.
+
+**Which custom metrics, and why those.** doc 08 §4 lists the set; the interesting
+part is the ones that are not derivable from HTTP metrics:
+
+| Metric | Why it is not already covered |
+|---|---|
+| `checkout.saga.outcomes{outcome}` | `http.server.requests` cannot tell a *declined payment* from a *malformed request* — both are 4xx. For this system the difference is the whole point, and alerting on the merged signal would page someone every time a customer's card was declined. |
+| `payments.outcomes{status}` | doc 08 §4 "payment success/failure"; a business fact, not a system error. |
+| `inventory.reservations{outcome}` | doc 08 §4 "inventory reservation failures"; demand outrunning stock, which is also what triggers saga compensation. |
+| `orders.placed` | doc 08 §4 "order creation rate". |
+| `reconciliation.orders{outcome}` | Phase 7's safety net was invisible: the job's outcomes only existed as log lines, so "is reconciliation doing anything, and is it succeeding" could not be answered without grepping. |
+| `outbox.events.unpublished` + `outbox.events.oldest.unpublished.age` | See below. |
+| `kafka.consumer.lag*` | See below. |
+
+**The outbox needs two series, and the age is the important one.** The outbox is
+what makes a Kafka outage survivable (ADR-009/015), and that design has a blind
+spot: a publisher that has stopped draining looks *exactly* like a healthy system
+from the outside, because every business request still succeeds. A count alone
+cannot distinguish "busy" from "stuck" — a backlog of one row that is an hour old
+is an incident, a backlog of fifty that is two seconds old is a Tuesday. Hence
+`outbox.events.oldest.unpublished.age`, and the alert is written on the age.
+
+**Kafka consumer lag is measured by the application, not by the collector.**
+The tidier home is the collector's `kafkametrics` receiver, and that was the
+first choice — but it needs the broker to advertise a listener the collector can
+resolve, and this broker advertises `localhost:9092` because the services run on
+the host. Adding a second advertised listener is the right fix and belongs with
+Phase 9, when the services themselves move into containers. Meanwhile the service
+is already a Kafka client on the correct listener, so it asks the broker directly
+for its own group's committed offsets. The trade-off is recorded rather than
+hidden: consumer lag is a broker fact being measured by a consumer.
+
+**Logs go over OTLP, not through log files.** The alternative is a JSON file per
+service plus a tailer, which needs a bind mount and a file watcher — and on
+Docker Desktop, inotify events do not propagate reliably across a Windows bind
+mount, which produces the worst kind of failure: it works until it does not. It
+also keeps the application unaware of its log backend, which is the same reason
+the collector sits in front of Jaeger.
+
+Log **labels** are constrained to `service_name`, `service_instance_id` and
+`deployment_environment`. Everything else the agent sends — process ids, the full
+command line, host details — is either dropped or left as structured metadata,
+because a Loki label with unbounded values creates a new stream per value and
+grows the index forever. Note the counter-intuitive part: `service.instance.id`
+is *pinned to a stable value* in the agent arguments rather than deleted, because
+Loki synthesises one when it is absent and the synthesised value is stable only
+within a stream. `trace_id` and `span_id` are log attributes, so they are
+structured metadata — queryable, not indexed — which is what makes a trace-id
+lookup a filter rather than a cardinality explosion.
+
+**Dashboards, datasources and rules are files, not clicks.** A dashboard that
+only exists in someone's browser is not documentation, cannot be reviewed, and
+disappears with the volume. Grafana provisions them at startup from
+`infra/grafana`, and Prometheus loads `infra/prometheus/rules`.
+
+**The whole environment is now one `docker compose up -d`.** Postgres joins the
+compose file in this phase, with its databases created by
+`infra/postgres/init-databases.sql`. It used to be a `docker run` plus a
+`docker exec psql` in the README — the kind of setup step that gets skipped,
+mistyped, or forgotten on a new machine, and then costs an hour.
+
+**Consequences.**
+- Every service now exposes `/actuator/health`, `/actuator/health/{liveness,readiness}`,
+  `/actuator/info` and `/actuator/prometheus` unauthenticated, and nothing else
+  under `/actuator`. Those endpoints are for Prometheus and for a kubelet, both of
+  which must reach them without a user token — a health check that needs OAuth
+  cannot be relied on during an identity-provider outage, which is exactly when it
+  is needed. `show-details: never` keeps the unauthenticated health endpoint from
+  leaking database or disk detail. Moving them to a separate management port is
+  the hardening step, and it is deferred with the rest of the network work
+  (docs/09 §6, Phase 10) rather than pretended to be done.
+- An app-emitted metric for a service that is down does not exist, which is why
+  `ServiceDown` is written on the scrape's `up`.
+- `percentiles-histogram` is enabled for `http.server.requests`. Without it
+  Micrometer exports only count/sum/max, no `_bucket` series exist, and a
+  percentile alert silently matches nothing. Client-side percentiles were not
+  used: a per-instance quantile cannot be aggregated across instances, which is
+  what an SLO needs to be.
+- The collector's self-metrics are exposed through an explicit Prometheus reader
+  and scraped too — the collector is the single ingestion point, so "the
+  collector is dropping telemetry" is a first-class symptom.
+
+**Status:** Accepted, Phase 8.
+
+## ADR-022: SLOs, Symptom Alerting, and Testing the Rules
+
+**Decision.** Checkout has a stated SLO — **p95 < 2 s, error rate < 1 %** — and
+every alert rule is written on a *symptom* of it (doc 08 §7). Rules are unit
+tested with `promtool` in the build, and the whole path was verified once by
+degrading a live system and watching an alert actually fire.
+
+**Why an SLO and not a set of thresholds.** A threshold without a budget has no
+answer to "is 400 ms bad?". The SLO is what makes a number actionable: 1.2 s is
+inside the budget (worse than yesterday, not yet a problem), 2.2 s is not. The
+Phase 8 baseline measured both, and the difference between them is the whole
+reason the number is written down.
+
+**Why symptoms, not causes.** Every rule is phrased the way a user would
+experience the failure — "checkout is slow", "checkout is failing", "events are
+not reaching Kafka" — and none of them names a cause. A rule like
+"payment-service CPU is high" fires on the wrong thing the moment the
+architecture changes; "checkout p95 is over budget" survives a rewrite of the
+payment path. This is doc 08 §7's instruction, and it is also the only kind of
+rule that keeps working as the system changes.
+
+**The four signals worth paging on**, and what each catches that the others miss:
+
+1. **Latency** (`CheckoutLatencyBreach`) — the failure that has *no errors at
+   all*. The baseline measured p95 at 2.2 s with a 100 % success rate; without
+   this rule nothing anywhere would have noticed.
+2. **Error rate** (`CheckoutErrorRateHigh`) — 5xx only. Business rejections are
+   deliberately excluded: they are counted in `checkout.saga.outcomes` and alerted
+   separately, and merging the two would make both useless.
+3. **An open breaker** (`CircuitBreakerOpen`) — a *change of failure mode*, from
+   slow to unavailable. It is the signal that the system has already given up on a
+   dependency, which no latency or error rate expresses on its own.
+4. **A stuck outbox** (`OutboxBacklogStuck`) — the blind spot of the outbox
+   design: business requests all succeed while events silently stop flowing.
+
+Plus `ServiceDown` on the scrape's `up`, which is the only rule that can express
+absence.
+
+**Why a business signal gets its own alert.** A decline spike
+(`PaymentDeclineSpike`) is not a fault — it is a fact about customers, cards, or
+the provider's threshold. It carries `kind: business` so that it can be routed
+and silenced differently from a system fault. Alerting on it through the error
+rate would have been cheaper to write and useless in both directions.
+
+**Why the rules are unit tested.** "An alert that has never fired is untested"
+(docs/13 §3). Degrading a live system is the only way to prove the whole path —
+metric, rule, evaluation, notification — but it is slow, flaky and impossible in
+CI. `promtool test rules` exercises the rule logic against synthetic series on
+every build, including the negative cases that matter most: a healthy checkout
+must not fire the latency alert, a *declined payment* must not fire the error
+alert, and a large-but-fresh outbox backlog must not fire the stuck alert.
+
+**No Alertmanager.** In development there is nowhere to route a notification, and
+the thing worth testing is the *rule*, not the routing. Prometheus evaluates the
+rules and reports state at `/alerts` and `/api/v1/alerts`, which is enough to
+prove firing and resolving. Routing, inhibition and silences belong with the
+production stack (Phase 10).
+
+**Known gap: no `absent()` / no-data alerts.** A rule whose series disappear
+stops firing rather than firing, so a metric that vanishes is silent. `ServiceDown`
+covers the common case (a whole service gone) because the scrape's `up` always
+exists, but a single missing series is not covered. Listed here rather than left
+to be discovered during an incident.
+
+**Verified end to end** (see `docs/phase-8-observability-baseline.md` §6): with a
+2 s provider delay, p95 rose to 2.48 s and `CheckoutLatencyBreach` fired while the
+success rate stayed at 100 %; pushing past the payment timeout produced a 93 %
+error rate with `CheckoutErrorRateHigh` and `CircuitBreakerOpen` firing; restoring
+the provider cleared all three. The same 2 s delay that produced a **45 % error
+rate** under Phase 7's slow-call default now produces **zero errors**, which is
+the Phase 7 fix confirmed in the live system rather than only in a unit test.
+
+**Status:** Accepted, Phase 8.

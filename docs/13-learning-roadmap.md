@@ -46,7 +46,7 @@ place recording knowledge that tutorials cannot give you.
 | ✅ | 5. Observability — tracing only | 7 | pulled forward, narrowed | you cannot debug async flows without traces |
 | ✅ | 6. Kafka & event-driven | 5 | expanded | + CDC alternative, choreography, reconciliation |
 | ✅ | 7. Resilience | 6 | reordered after 6 | consumer resilience needs Kafka to exist |
-| **8** | **Observability — metrics/logs/alerts** | 7 | remainder | dashboards are only meaningful once there is async load |
+| ✅ | 8. Observability — metrics/logs/alerts | 7 | remainder | dashboards are only meaningful once there is async load |
 | **9** | **Containerization** | 8 | reframed | you already use Docker — this phase is *productionizing* it |
 | **10** | **Kubernetes + IaC** | 9 | time-boxed, +Terraform +secrets | add the two things doc 09 asks for but the roadmap omitted |
 | **11** | **CI/CD + contract testing** | 10 | expanded | contract testing is named in doc 10 but no phase delivered it |
@@ -183,7 +183,16 @@ job. This is the part everyone skips and production punishes.
 **Gotcha to capture.** Timeout interactions (a 3s read timeout inside a 5s saga
 budget), retry amplification.
 
-### Phase 8 — Observability: metrics, logs, alerts
+### Phase 8 — Observability: metrics, logs, alerts ✅ DONE
+
+> **Implemented (2026-09-22).** SLO defined (checkout p95 < 2 s, error rate
+> < 1 %), the system degraded and measured *before* anything was built
+> (`docs/phase-8-observability-baseline.md`), then Actuator + Micrometer →
+> Prometheus (pulled), logs over OTLP → Loki, Grafana dashboards provisioned from
+> files, and eleven symptom-based rules — unit tested with `promtool` and proved
+> by degrading the live stack until they fired, then restoring it until they
+> resolved. Kafka consumer lag and outbox backlog are both measured. See ADR-021
+> and ADR-022, and `PROGRESS.md` for the gotchas.
 
 **Break it first.** Define an SLO for checkout (e.g. p95 < 2s, error rate
 < 1%). Then degrade the system and watch it burn — with no alert configured.

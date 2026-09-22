@@ -1,8 +1,21 @@
 # Project Progress — session handoff
 
-Last updated: 2026-09-22 (Phase 7 Resilience implemented and verified)
+Last updated: 2026-09-22 (Phase 8 Observability implemented and verified)
 
-## Status: Phase 7 (Resilience) — implemented and verified
+## Status: Phase 8 (Observability) — implemented and verified
+
+Phases 4-7 are DONE and committed. Phase 8 is implemented and verified against a
+live stack: every service exposes Prometheus metrics, traces and logs reach the
+collector and land in Jaeger and Loki, Grafana has provisioned dashboards over
+all three, and **the alert rules were proved by degrading the system and watching
+them fire — then watching them resolve.** See "Phase 8 (observability)" below.
+
+Two Phase 7 bugs were found by the Phase 8 baseline and fixed here: a
+slow-call circuit-breaker default that converted a working-but-slow dependency
+into a 45% error rate, and the `infra/otel/` collector config never having been
+committed at all (an unanchored `.gitignore` pattern).
+
+## Phase 7 (Resilience) — implemented and verified
 
 Phases 4, 5 and 6 are DONE and committed. Phase 7 is implemented: timeouts with
 a saga-wide deadline, per-dependency Resilience4j circuit breakers, bounded
@@ -337,6 +350,112 @@ unbroken across the broker (doc 13 §3 Phase 6, doc 06).
   stale jar behind (and `clean` fails with "being used by another process").
   Stop the services before rebuilding — this cost a full debugging cycle here.
 
+## Phase 8 (observability) — implemented and verified
+
+Goal: make the system answer "is it healthy, and if not, why" without reading
+logs by hand (doc 13 §3, doc 08; ADR-021, ADR-022).
+
+### The baseline first (doc 13 §3's protocol, this time actually run)
+
+`docs/phase-8-observability-baseline.md` has the numbers. The short version:
+
+| Scenario | p95 | error rate | noticed? |
+|---|---|---|---|
+| healthy | 333 ms | 0 % | — |
+| provider delay 1.2 s | 1391 ms | 0 % | **nothing** (still in SLO, 4× worse) |
+| provider delay 2.0 s | 2225 ms | 0 % | **nothing** |
+| provider delay 6.0 s | 6568 ms | 75 % | **nothing** |
+| 2.0 s, Phase 7 breaker default | 2225 ms | **45 %** | only a stray `WARN` log line |
+
+Then, after the phase, the same degradations: p95 2.48 s with 100 % success
+raised `CheckoutLatencyBreach`; 93 % errors raised `CheckoutErrorRateHigh` and
+`CircuitBreakerOpen`; restoring the provider cleared all three. The 2.0 s delay
+that produced 45 % errors now produces **zero**.
+
+### What is implemented
+
+- **Metrics (8a).** Actuator + `micrometer-registry-prometheus` are dependencies
+  of `common`, so every servlet service is instrumented whether or not anyone
+  remembered; the gateway declares them itself (it cannot depend on `common`).
+  Metrics are **pulled** from `/actuator/prometheus`; the agent's
+  `otel.metrics.exporter=none` avoids a second series per measurement.
+- **Custom metrics.** `ApplicationMetrics` in `common` owns the business signals
+  doc 08 §4 asks for — checkout outcomes, payment outcomes, reservation outcomes,
+  orders placed, reconciliation outcomes — because `http.server.requests` cannot
+  tell a declined payment (409) from a malformed request. Plus
+  `outbox.events.{unpublished,oldest.unpublished.age}` and Kafka consumer lag.
+- **Logs (8c).** The agent exports logs over OTLP; the collector forwards them to
+  Loki. No file appender, no tailer, no bind mount — which also sidesteps the
+  Docker-Desktop inotify problem. Log records carry `trace_id`, so a log line
+  links straight to its trace. Labels are constrained to `service_name`,
+  `service_instance_id`, `deployment_environment`.
+- **Dashboards (8b).** Two provisioned from `infra/grafana/dashboards/`:
+  platform overview (SLO, RED, dependency guards, outbox, lag, pool) and
+  checkout & payments (business outcomes, reconciliation, plus a Loki panel).
+  Prometheus, Loki and Jaeger are all datasources, so a slow checkout is a metric,
+  a log line and a trace without changing tabs.
+- **Alerts (8e).** Eleven rules in `infra/prometheus/rules/`, all written on
+  symptoms. Unit tested with `promtool` (11 tests, including the negative cases) so
+  they run on every build. No Alertmanager — nothing to route to in dev.
+- **Health (8d).** `liveness`/`readiness` groups; readiness includes the database
+  for DB-backed services, liveness deliberately does not. The four observability
+  endpoints are unauthenticated (Prometheus and a kubelet need them without a
+  token); nothing else under `/actuator` is exposed.
+- **The whole environment is one `docker compose up -d`.** Postgres moved into
+  compose with `infra/postgres/init-databases.sql`, and Prometheus, Grafana and
+  Loki joined the stack.
+- **Two tools added** because the phase's protocol needs repeatable drivers rather
+  than a session transcript: `scripts/start-services.sh` (start/stop all seven,
+  wait for readiness) and `scripts/checkout-load.sh` (SLO probe: p50/p95/p99 and
+  error rate).
+
+### Verified
+
+- `./mvnw test` → **94 unit tests** green (was 91; +2 resilience slow-call cases,
+  +1 checkout outcome metric).
+- `./mvnw verify` → whole reactor green with Docker.
+- `promtool test rules` → 11/11.
+- Live stack: 7/7 Prometheus targets up; Loki holds logs from all seven services
+  with `trace_id` intact; both dashboards provisioned; alerts fired and resolved
+  as described above.
+
+### Phase 8 gotchas (also in the list below)
+
+- **A `@ConditionalOnBean(MeterRegistry.class)` in an auto-configuration can be
+  evaluated before Boot registers the registry**, so the beans are silently never
+  created — no error, just absent metrics. Injecting the registry directly avoids
+  the ordering question entirely.
+- **A class-level `@ConditionalOnClass` is not enough to keep a bean method's
+  parameter types off the classpath.** Once the class passes its condition, Spring
+  resolves *every* method signature, so an outbox metric in the same class as a
+  Micrometer-only metric broke checkout-service with
+  `ClassNotFoundException: JpaRepository`. Split the configuration per dependency.
+- **Prometheus strips reserved exposition suffixes from metric names.**
+  `orders.created` was exported as `orders_total` — "created" silently vanished.
+  Avoid ending a metric name with `created`, `total`, `sum`, `count`, `bucket`
+  or `info`.
+- **Loki synthesises `service_instance_id` when the resource attribute is
+  absent**, and the synthesised value is stable only within a stream — so
+  *deleting* the agent's random one is worse than keeping it. Pin it to a stable
+  value instead.
+- **The `resource` processor, not `attributes`, for resource attributes.**
+  `attributes` only touches a record's own attributes; using it on
+  `service.instance.id` silently did nothing.
+- **PromQL does not allow a line break inside a vector selector's braces**, and
+  the error points at the line *after* the one that is wrong.
+- **Micrometer exports no histogram buckets by default.** Without
+  `management.metrics.distribution.percentiles-histogram.http.server.requests=true`
+  there are no `_bucket` series and every percentile alert silently matches
+  nothing.
+- **`docker compose up -d <service>` does not reload a bind-mounted config** —
+  the container is "Running" so compose leaves it alone. `docker compose restart`
+  is needed, and forgetting it means editing a file and testing the old one.
+- **Collector 0.160.0 needs an explicit Prometheus reader** for its self-metrics
+  (`service.telemetry.metrics.readers`); the old `level: basic` no longer listens
+  on 8888, so the scrape target is simply `down`.
+- **`otlphttp` is deprecated in collector 0.160.0** — use `otlp_http` (the same
+  rename that produced `otlp_grpc` for Jaeger).
+
 ## Phase 7 (resilience) — implemented and verified
 
 Goal: stop a slow or failing dependency from taking the caller down, make
@@ -601,6 +720,53 @@ behind** (doc 13 §3, ADR-017…020).
   another process". A live-stack run therefore executed stale code and looked
   like a DLT bug. **Stop the services before rebuilding**, and check the jar
   mtime whenever behaviour does not match the source.
+- **An unanchored `.gitignore` pattern silently ignores paths at any depth.**
+  `otel/` was meant for the fetched agent jar at the repository root, but it also
+  matched `infra/otel/`, so **the OpenTelemetry Collector's configuration was
+  never committed** — the compose file mounted a file a fresh clone did not have,
+  and Phase 5's tracing would not have started for anyone else. Fixed by anchoring
+  it to `/otel/`. Worth auditing any ignore pattern that is a bare directory name.
+- **`docker compose up -d <service>` does not reload a bind-mounted config.** The
+  container is already "Running", so compose leaves it alone and you test the old
+  file. Use `docker compose restart <service>` after editing
+  `infra/otel/otel-collector-config.yaml`, `infra/loki/…` or
+  `infra/prometheus/prometheus.yml` (Prometheus can also `POST /-/reload`, which
+  is what `--web.enable-lifecycle` is for).
+- **A `@ConditionalOnBean(MeterRegistry.class)` inside an auto-configuration is
+  order-sensitive and fails silently.** The registry is registered by Boot's own
+  metrics auto-configuration, so a condition evaluated before it sees no bean and
+  creates nothing — no error, no warning, just absent metrics. Inject the registry
+  directly instead: by instantiation time every definition exists.
+- **`@ConditionalOnClass` on the class does not protect bean-method parameter
+  types.** Once the class passes its own condition Spring resolves *every* method
+  signature, so a metric needing JPA in the same configuration class as one
+  needing only Micrometer broke checkout-service with
+  `ClassNotFoundException: org.springframework.data.jpa.repository.JpaRepository`.
+  One auto-configuration per optional dependency.
+- **Prometheus strips reserved exposition suffixes from metric names.**
+  `orders.created` was exported as `orders_total`: the word "created" disappeared
+  with no error, and only a dashboard query returning nothing would have shown it.
+  Do not end a metric name with `created`, `total`, `sum`, `count`, `bucket` or
+  `info` — the registry re-adds its own.
+- **Loki synthesises `service_instance_id` when the resource attribute is
+  missing**, and the synthesised value is stable only within a stream — so each
+  new stream brings a new one. Deleting the agent's random per-JVM UUID is
+  therefore *worse* than keeping it; pin it to a stable value in the agent's
+  `otel.resource.attributes` instead. (Also: the `resource` processor, not
+  `attributes`, is what edits resource attributes — `attributes` only touches a
+  record's own, and using it there silently does nothing.)
+- **PromQL does not accept a line break inside a vector selector's braces**, and
+  the parse error points at the line *after* the offending one ("unexpected
+  character: '}'"), which sends you looking in the wrong place.
+- **Micrometer exports no histogram buckets unless you ask.** Without
+  `management.metrics.distribution.percentiles-histogram.http.server.requests=true`
+  there are no `_bucket` series, so `histogram_quantile` has nothing to work with
+  and a percentile alert silently matches nothing forever.
+- **Collector 0.160.0 needs an explicit Prometheus reader for its own metrics.**
+  `service.telemetry.metrics.level: basic` no longer exposes anything on 8888 —
+  the config has to declare `readers: [- pull: {exporter: {prometheus: …}}]`, or
+  the scrape target is just `down` with no other symptom. (`otlphttp` is also
+  deprecated in this version; use `otlp_http`.)
 - **`-pl <service>` resolves `common` from the local repository, not the
   reactor.** After changing anything in `common`, run
   `./mvnw install -DskipTests -pl common` before running a single module's ITs,
@@ -664,9 +830,14 @@ pattern prevents, measure it, then implement) — see doc 13 §1.
   backoff+jitter, bulkheads and bounded pools, the doc 10 §7 failure-injection
   tests, and the reconciliation job for orders stranded by a partial saga
   failure (ADR-017…020).
-- **Phase 8 — Observability: metrics/logs/alerts** (remainder of old Phase 7).
-  Micrometer → Prometheus, Grafana dashboards, Loki, alerts on symptoms
-  (doc 08 §4, §6-7) — including Kafka consumer lag and outbox backlog.
+- **Phase 8 — Observability: metrics/logs/alerts** ✅ DONE (remainder of old
+  Phase 7). Actuator + Micrometer → Prometheus (pulled), logs over OTLP → Loki,
+  traces → Jaeger, Grafana dashboards provisioned from files, eleven
+  symptom-based alert rules unit tested with `promtool` and proved by degrading
+  the live system (ADR-021, ADR-022). Kafka consumer lag and outbox backlog are
+  both measured. Deliberately not done: Alertmanager (nothing to route to in
+  dev), `absent()`/no-data alerts, and a separate management port for the
+  actuator endpoints.
 - **Phases 9-12** — containerization (productionizing images, not learning
   Docker), Kubernetes + Terraform + secrets management (**time-boxed**),
   CI/CD + contract testing (doc 10 §5, previously unassigned), production

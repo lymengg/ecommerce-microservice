@@ -214,45 +214,44 @@ ADR-020.
 
 ## Run (full stack locally)
 
-Requirements: Docker (PostgreSQL + Keycloak + Jaeger + OTel Collector + Kafka),
-Java 21. Maven itself is not needed — use the wrapper (`./mvnw`).
+Requirements: Docker, Java 21. Maven itself is not needed — use the wrapper
+(`./mvnw`).
 
 ```bash
-# 1. start Keycloak (:8087), Jaeger (:16686), the OTel Collector (:4317)
-#    and Kafka (:9092, KRaft mode — no ZooKeeper)
-docker compose up -d keycloak jaeger otel-collector kafka
+# 1. the whole environment: PostgreSQL (one database per service, created by
+#    infra/postgres/init-databases.sql), Keycloak, Kafka, and the observability
+#    stack (Jaeger, OTel Collector, Prometheus, Grafana, Loki).
+#    One command as of Phase 8 — this used to be a docker run plus a docker exec
+#    psql in this README, which is exactly the kind of setup step that gets
+#    skipped or mistyped on a new machine.
+docker compose up -d
 
-# 2. start PostgreSQL with one database per service
-#    host port 5433, because 5432 is often taken by a local PostgreSQL —
-#    pass DB_PORT=5433 to every service, as in step 4
-docker run --name ecommerce-db -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
-  -p 5433:5432 -d postgres:16-alpine
-# one -c per statement: CREATE DATABASE cannot run inside a transaction block,
-# and several statements in a single -c are wrapped in one
-docker exec -i ecommerce-db psql -U postgres \
-  -c "CREATE DATABASE ecommerce_catalog" \
-  -c "CREATE DATABASE ecommerce_cart" \
-  -c "CREATE DATABASE ecommerce_inventory" \
-  -c "CREATE DATABASE ecommerce_order" \
-  -c "CREATE DATABASE ecommerce_payment"
-
-# 3. build everything, and fetch the pinned OTel agent into otel/
+# 2. build everything, and fetch the pinned OTel agent into otel/
 #    `install`, not `package`: with -pl <service> alone the module cannot
 #    resolve `common`, which is only ever installed into the local repository
 ./mvnw install -DskipTests
 
-# 4. start each service (own terminal or background)
-DB_PORT=5433 ./mvnw -pl gateway-service   spring-boot:run   # :8080
-DB_PORT=5433 ./mvnw -pl catalog-service   spring-boot:run   # :8081
-DB_PORT=5433 ./mvnw -pl cart-service      spring-boot:run   # :8082
-DB_PORT=5433 ./mvnw -pl inventory-service spring-boot:run   # :8083
-DB_PORT=5433 ./mvnw -pl order-service     spring-boot:run   # :8084
-DB_PORT=5433 ./mvnw -pl payment-service   spring-boot:run   # :8085
-DB_PORT=5433 ./mvnw -pl checkout-service  spring-boot:run   # :8086
+# 3. start all seven services (each to its own log file, then wait for readiness)
+DB_PORT=5433 ./scripts/start-services.sh
+#    ...or one at a time, in a terminal each:
+#    DB_PORT=5433 ./mvnw -pl gateway-service spring-boot:run     # :8080
+#    DB_PORT=5433 ./mvnw -pl catalog-service spring-boot:run     # :8081
+#    DB_PORT=5433 ./mvnw -pl cart-service spring-boot:run        # :8082
+#    DB_PORT=5433 ./mvnw -pl inventory-service spring-boot:run   # :8083
+#    DB_PORT=5433 ./mvnw -pl order-service spring-boot:run       # :8084
+#    DB_PORT=5433 ./mvnw -pl payment-service spring-boot:run     # :8085
+#    DB_PORT=5433 ./mvnw -pl checkout-service spring-boot:run    # :8086
+#
+#    stop them again with: ./scripts/start-services.sh --stop
 ```
 
-**Jaeger UI: http://localhost:16686** — a single checkout appears as one trace
-spanning all seven services. See [Tracing](#tracing) below.
+**Grafana: http://localhost:3000** — dashboards for the platform and for
+checkout/payments, with Prometheus, Loki and Jaeger wired in. **Jaeger:
+http://localhost:16686** — a single checkout appears as one trace spanning all
+seven services. See [Observability](#observability-phase-8) below.
+
+Postgres is on host port **5433**, because 5432 is often taken by a local
+PostgreSQL — hence `DB_PORT=5433` above.
 
 Keycloak note: `--import-realm` skips a realm that already exists, so after
 editing `infra/keycloak/ecommerce-realm.json` recreate the container
@@ -357,11 +356,129 @@ collector, and a collector-side sampling policy. Both are Phase 9-10 concerns
 (see ADR-014). No customer id is placed on spans — it is a pseudonymous
 personal identifier (doc 08 §3).
 
+## Observability (Phase 8)
+
+Three pillars, one place to look, and one ingestion point (ADR-021).
+
+```text
+                    ┌──────────────────────────────────────────┐
+  services ──OTLP──►│ otel-collector                           │──► Jaeger   (traces)
+  (Java agent)      │  traces + logs; metrics are NOT pushed   │──► Loki     (logs)
+                    └──────────────────────────────────────────┘
+  Prometheus ──scrape──► each service /actuator/prometheus      (metrics, pulled)
+       │
+       ├── alert rules  (infra/prometheus/rules)
+       └──► Grafana :3000  ── Prometheus + Loki + Jaeger datasources
+```
+
+| UI | URL | What it is for |
+|---|---|---|
+| Grafana | http://localhost:3000 | dashboards, and the entry point to all three pillars |
+| Prometheus | http://localhost:9090 | raw queries, `/alerts` for alert state, `/targets` for scrape health |
+| Jaeger | http://localhost:16686 | traces |
+| Loki | http://localhost:3100 | log queries (via Grafana, or the API) |
+
+**Metrics are pulled, traces and logs are pushed.** A metric is a small fixed-size
+fact that is cheap to fetch on a schedule, and the scrape itself is a health
+signal (`up`) — the only way to observe a service being *absent*, since a dead
+service exports nothing. Logs and traces are large and per-event, so the agent
+pushes them over the OTLP connection it already has. Metrics are deliberately
+**not** also pushed: two paths would mean two series for every measurement, and a
+dashboard would silently disagree with an alert about the same system.
+
+### What is measured
+
+| Source | Examples |
+|---|---|
+| HTTP (RED) | `http_server_requests_seconds_{count,bucket}` per service, uri, status |
+| JVM / process | `jvm_memory_used_bytes`, `jvm_gc_pause_seconds`, `process_cpu_usage` |
+| Database | `hikaricp_connections_{active,idle,pending,max}` |
+| Resilience (ADR-017) | `resilience4j_circuitbreaker_state`, `resilience4j_retry_calls_total`, `resilience4j_bulkhead_available_concurrent_calls` |
+| Outbox | `outbox_events_unpublished`, `outbox_events_oldest_unpublished_age_seconds` |
+| Kafka | `kafka_consumer_lag_aggregate`, `kafka_consumer_lag{topic}` |
+| Business | `checkout_saga_outcomes_total{outcome}`, `payments_outcomes_total{status}`, `inventory_reservations_total{outcome}`, `orders_placed_total`, `reconciliation_orders_total{outcome}` |
+| Collector | `otelcol_receiver_refused_{spans,log_records}`, `otelcol_exporter_queue_size` |
+
+Business outcomes are separated from errors on purpose: a declined payment is a
+`409` and a fact about customers, and merging it into the error rate would make
+both signals useless.
+
+### Alerts
+
+Rules live in `infra/prometheus/rules/` and are written on **symptoms**, never on
+causes (doc 08 §7). The SLO is checkout **p95 < 2 s, error rate < 1 %**.
+
+| Alert | Fires when |
+|---|---|
+| `CheckoutLatencyBreach` | checkout p95 over 2 s — the failure with *no errors at all* |
+| `CheckoutErrorRateHigh` | >1 % of checkouts return 5xx (business rejections excluded) |
+| `CircuitBreakerOpen` | a dependency is being denied without an attempt (ADR-017) |
+| `ServiceDown` | a target stops answering scrapes |
+| `OutboxBacklogStuck` | the oldest unpublished event is over 5 minutes old |
+| `KafkaConsumerLagHigh`, `DatabasePoolSaturated` | consumers behind; requests queueing for connections |
+| `PaymentDeclineSpike`, `InventoryReservationFailureSpike` | business signals, labelled `kind: business` |
+| `TelemetryDropped`, `TelemetryExporterQueueFilling` | the collector is losing telemetry |
+
+```bash
+# check what is firing right now
+curl -s localhost:9090/api/v1/alerts | grep -o '"alertname":"[^"]*","state":"[^"]*"'
+
+# test the rules without touching a running system (this runs in CI)
+docker run --rm -v "$(pwd)/infra/prometheus:/etc/prometheus" \
+  --entrypoint promtool prom/prometheus:v3.1.0 \
+  test rules /etc/prometheus/rules-tests/ecommerce-slo_test.yml
+```
+
+There is deliberately **no Alertmanager**: in development there is nowhere to
+route a notification, and the thing worth testing is the rule. Routing and
+silences belong with the production stack (Phase 10).
+
+### Health probes
+
+`/actuator/health` (aggregate), `/actuator/health/liveness` and
+`/actuator/health/readiness` on every service and the gateway. Readiness includes
+the database for the DB-backed services — doc 08 §8 wants readiness to mean "this
+instance can receive traffic", not merely "the context finished starting".
+Liveness deliberately does **not** include the database: restarting a service
+cannot fix a database outage and would only remove the instances that could
+recover.
+
+These four endpoints are unauthenticated (Prometheus and a kubelet both need them
+without a user token, and a health check that needs OAuth cannot be relied on
+during an identity-provider outage), and nothing else under `/actuator` is
+exposed. Moving them to a separate management port is the hardening step, deferred
+with the rest of the network work (docs/09 §6, Phase 10).
+
+### Watching it burn
+
+`scripts/checkout-load.sh` drives checkouts and reports p50/p95/p99 and the error
+rate, so the SLO can be checked from outside and degradations reproduced:
+
+```bash
+# raise the gateway's per-subject limit first, or you measure the rate limiter
+RATE_LIMIT=1000 ./scripts/start-services.sh
+
+ITERATIONS=30 ./scripts/checkout-load.sh
+
+# degrade the system on purpose: a slow provider, which is the failure that
+# produces no errors at all — and therefore the one only a latency SLO notices
+DB_PORT=5433 PAYMENT_PROVIDER_DELAY=2000ms ./mvnw -pl payment-service spring-boot:run
+```
+
+The measurements, before and after, are in
+`docs/phase-8-observability-baseline.md`.
+
 ## Test
 
 ```bash
 ./mvnw test        # unit tests only (no Docker needed)
 ./mvnw verify      # full reactor: unit + integration tests (Testcontainers, requires Docker)
+
+# alert rules — deterministic, no stack needed, so it belongs in CI alongside the
+# unit tests. "An alert that has never fired is untested" (docs/13 §3).
+docker run --rm -v "$(pwd)/infra/prometheus:/etc/prometheus" \
+  --entrypoint promtool prom/prometheus:v3.1.0 \
+  test rules /etc/prometheus/rules-tests/ecommerce-slo_test.yml
 ```
 
 ### Authorization smoke test
@@ -451,6 +568,17 @@ service-account role mapping) and token relay end-to-end (requires Docker).
 | `spring.cloud.gateway.server.webflux.httpclient.response-timeout` | `15s` | gateway | edge response timeout; must exceed the saga budget |
 | `spring.cloud.gateway.server.webflux.httpclient.pool.max-connections` | `200` | gateway | edge connection pool |
 | `spring.cloud.gateway.server.webflux.httpclient.pool.acquire-timeout` | `1000` | gateway | edge pool acquire timeout (ms) |
+| `ecommerce.payment.provider-delay` | `0s` | payment | mock provider latency — the knob used to degrade the system on purpose |
+| `ecommerce.metrics.kafka-lag.enabled` | `false` | order/inventory | export consumer lag for this service's group (off where there is no consumer) |
+| `ecommerce.metrics.kafka-lag.group` | `spring.application.name` | order/inventory | consumer group to measure |
+| `ecommerce.metrics.kafka-lag.interval-ms` | `15000` | order/inventory | how often committed offsets are refreshed |
+| `management.endpoints.web.exposure.include` | `health,info,prometheus` | all + gateway | the only actuator endpoints exposed |
+| `management.endpoint.health.probes.enabled` | `true` | all + gateway | enables `/actuator/health/{liveness,readiness}` |
+| `management.endpoint.health.show-details` | `never` | all + gateway | the health endpoint is unauthenticated; do not leak DB/disk detail |
+| `management.metrics.distribution.percentiles-histogram.http.server.requests` | `true` | all + gateway | exports `_bucket` series so p95 can be computed (no buckets ⇒ percentile alerts silently match nothing) |
+| `management.metrics.tags.environment` | `${ENVIRONMENT:local}` | all + gateway | common tag on every metric |
+| `ENVIRONMENT` | `local` | all + gateway | value of the `environment` tag |
+| `PAYMENT_PROVIDER_DELAY` | `0s` | payment | env override for the mock provider delay |
 
 ## Endpoints (base `/api/v1`, all services)
 
@@ -472,6 +600,15 @@ SERVICE = client-credentials token. `/internal/**` endpoints are SERVICE-only.
 | POST | `/payments/{id}/refund` | payment | ADMIN | refund (full or partial) |
 | POST | `/payments/webhooks/{provider}` | payment | public | provider webhook (idempotent, allowlisted) |
 | POST | `/checkout` | checkout | CUSTOMER | full checkout saga (Idempotency-Key) |
+
+Observability endpoints (unauthenticated, not routed through the gateway — see
+[Health probes](#health-probes)):
+
+| Method | Path | Service | Purpose |
+|---|---|---|---|
+| GET | `/actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness` | all + gateway | probes; readiness includes the database for DB-backed services |
+| GET | `/actuator/info` | all + gateway | build info |
+| GET | `/actuator/prometheus` | all + gateway | Prometheus scrape endpoint |
 
 Internal service-to-service endpoints (SERVICE role, not routed through the
 gateway):
