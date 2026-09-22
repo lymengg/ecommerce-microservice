@@ -46,6 +46,13 @@ public abstract class AbstractIntegrationTest {
         registry.add("ecommerce.order.base-url", () -> "http://localhost:" + WIRE_MOCK.port());
         registry.add("ecommerce.security.service-client.token-uri",
                 () -> "http://localhost:" + WIRE_MOCK.port() + "/token");
+        // This module's ITs have no broker, and the scheduled publisher would
+        // otherwise spend every poll timing out against localhost:9092 — about
+        // two minutes per run. The publisher's real behaviour is covered where
+        // there *is* a broker (order-service's OutboxPublisherIT), so turning it
+        // off here costs no coverage; the outbox rows are still asserted on
+        // directly. Same override as order-service's IT base.
+        registry.add("ecommerce.outbox.poll-interval-ms", () -> "3600000");
     }
 
     @BeforeEach
