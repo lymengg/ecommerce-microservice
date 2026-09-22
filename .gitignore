@@ -1,9 +1,17 @@
 target/
 *.class
 *.log
+# Service stdout when started via scripts/start-services.sh. Anchored, and not
+# just *.log, because the script also writes a .services.pids file there.
+/logs/
 # OpenTelemetry Java agent, fetched by the validate-phase maven-dependency-plugin
 # copy in pom.xml. Pinned by version, never committed.
-otel/
+#
+# Anchored to the repository root on purpose. Unanchored, this pattern also
+# matched `infra/otel/`, so the OpenTelemetry Collector's configuration was
+# silently never committed — the repo's compose file mounted a file a fresh
+# clone did not have. (Found in Phase 8 while editing that very file.)
+/otel/
 .idea/
 *.iml
 .vscode/

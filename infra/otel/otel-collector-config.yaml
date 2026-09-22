@@ -1,0 +1,193 @@
+# OpenTelemetry Collector — local development configuration.
+#
+# Topology: services -> OTLP -> this collector -> Jaeger (storage + UI).
+#
+# The collector exists as a separate tier so applications never talk to a
+# tracing backend directly. That is what lets the backend be swapped (Jaeger
+# here, Tempo in Phase 8) without touching a single service, and it is where
+# central concerns belong: sampling, redaction, retry, batching.
+#
+# Docs: https://opentelemetry.io/docs/collector/configuration/
+
+receivers:
+  # OTLP is the only ingestion protocol. gRPC is what the Java agent uses by
+  # default; HTTP is enabled for curl/manual debugging.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # memory_limiter MUST be the first processor in every pipeline: it refuses
+  # new data before the collector OOMs, and OOMing loses buffered telemetry.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 15
+
+  # Batching reduces the number of export calls. Runs after memory_limiter.
+  batch:
+    send_batch_size: 1024
+    timeout: 1s
+
+  # Trims the resource attributes the Java agent attaches to every log record
+  # down to what is worth keeping.
+  #
+  # Two reasons, and the first is the serious one:
+  #
+  # 1. Cardinality. Loki indexes some resource attributes as stream labels, and
+  #    `service.instance.id` is one of them. Note what is NOT done here: the
+  #    agent's service.instance.id is a fresh UUID per JVM start, so deleting it
+  #    looks like the obvious fix — and it is the wrong one. Loki *synthesises*
+  #    service_instance_id when it is absent, which is worse: the generated value
+  #    is stable only within a stream, so every new stream brings a new one. The
+  #    fix is to send a stable id instead, which is done in the parent POM's
+  #    agent arguments (one replica per service in development). Recorded in
+  #    PROGRESS.md, because "delete it" is the intuitive move and it backfires.
+  #
+  # 2. Noise. host.*, os.*, process.* and telemetry.* describe the JVM's
+  #    environment, not the request. They are identical on every line, so they
+  #    cost storage on every line and answer nothing. process.command_line also
+  #    carries the full local filesystem path of the jar, which has no business
+  #    being shipped to a log store.
+  #
+  # Deliberately kept: service.name and deployment.environment (the two labels
+  # worth indexing). trace_id and span_id are *log* attributes rather than
+  # resource attributes, so they are already structured metadata — searchable,
+  # not indexed, which is exactly what a trace-id lookup should be.
+  # NOTE: the `resource` processor, not `attributes`. These keys live on the
+  # *resource*, and the `attributes` processor only ever touches a record's own
+  # attributes — using it here silently did nothing, which is why the label was
+  # still present after the first attempt.
+  resource/trim_resource:
+    attributes:
+      # service.instance.id is deliberately NOT deleted: see point 1 above.
+      - key: host.name
+        action: delete
+      - key: host.arch
+        action: delete
+      - key: os.type
+        action: delete
+      - key: os.description
+        action: delete
+      - key: os.version
+        action: delete
+      - key: process.pid
+        action: delete
+      - key: process.command_line
+        action: delete
+      - key: process.executable.path
+        action: delete
+      - key: process.runtime.name
+        action: delete
+      - key: process.runtime.version
+        action: delete
+      - key: process.runtime.description
+        action: delete
+      - key: telemetry.sdk.name
+        action: delete
+      - key: telemetry.sdk.language
+        action: delete
+      - key: telemetry.sdk.version
+        action: delete
+      - key: telemetry.distro.name
+        action: delete
+      - key: telemetry.distro.version
+        action: delete
+
+  # Redaction. The Java agent does not capture HTTP headers by default, but
+  # defense in depth: drop anything that could carry a credential or PII if a
+  # future instrumentation change starts emitting it.
+  # Attribute names are matched with the delete action below.
+  attributes/redact:
+    actions:
+      - key: http.request.header.authorization
+        action: delete
+      - key: http.response.header.set-cookie
+        action: delete
+      - key: http.request.header.cookie
+        action: delete
+
+exporters:
+  # Jaeger v2 ingests OTLP natively. Collector 0.160.0 split the OTLP exporter
+  # into otlp_grpc/otlp_http; the bare `otlp` alias is deprecated.
+  # `insecure: true` because this is the internal compose network, not a public
+  # endpoint — see infra/otel/README.md before reusing this anywhere real.
+  otlp_grpc/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Logs to Loki over OTLP (Phase 8, ADR-021). Loki 3.x accepts OTLP natively at
+  # /otlp/v1/logs, so no translation layer is needed and the log records keep
+  # their structured attributes — including the trace_id/span_id the agent adds,
+  # which is what makes "show me the logs for this trace" a query instead of a
+  # grep across seven files.
+  #
+  # Note what is deliberately absent: a filelog receiver. The other design is for
+  # each service to write JSON to a file and have a tailer scrape it, but that
+  # needs a bind mount plus a tailer, and on Docker Desktop inotify events do not
+  # propagate reliably across a Windows bind mount — the classic "it works until
+  # the file is appended to" failure. Shipping over OTLP avoids the whole class of
+  # problem and keeps the application unaware of its log backend.
+  # `otlp_http`, not `otlphttp`: the bare alias is deprecated in collector
+  # 0.160.0 and logs a warning on every start (the same rename that produced
+  # `otlp_grpc` for Jaeger — see PROGRESS.md).
+  otlp_http/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+  # Debug exporter: logs every span to the collector's stdout. Extremely useful
+  # when a span is not arriving, but it prints span attributes verbatim — so it
+  # is deliberately NOT wired into the pipeline below. Add it to the traces
+  # exporters list temporarily when debugging, then remove it.
+  # debug:
+  #   verbosity: basic
+
+extensions:
+  # Exposes GET :13133/ for liveness checks.
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact, batch]
+      exporters: [otlp_grpc/jaeger]
+
+    # Logs (Phase 8). Same receiver as traces — the Java agent exports both over
+    # the one OTLP connection — and the same redaction processor, because a
+    # credential can arrive in a log line just as easily as in a span attribute.
+    #
+    # There is deliberately no metric pipeline: metrics are pulled from each
+    # service by Prometheus (otel.metrics.exporter=none), so pushing them here as
+    # well would create a second series for every measurement and the dashboards
+    # would silently disagree with each other.
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/trim_resource, attributes/redact, batch]
+      exporters: [otlp_http/loki]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      # Collector self-metrics, scraped by Prometheus to alert on dropped spans
+      # and export failures.
+      #
+      # The reader has to be declared explicitly. `level: basic` used to be
+      # enough to expose these on :8888, but collector 0.160.0 replaced that
+      # with a readers list — with only `level` set, nothing listens on 8888 and
+      # the Prometheus target reports `down` with no other symptom. The
+      # `prometheus` reader is what the compose port mapping publishes.
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
