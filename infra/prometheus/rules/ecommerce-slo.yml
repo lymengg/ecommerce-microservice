@@ -1,0 +1,184 @@
+# Alert rules for the e-commerce platform (Phase 8, ADR-021).
+#
+# Doc 08 §7: alert on *symptoms*, not exceptions. Every rule below is phrased in
+# terms a user would recognise — "checkout is slow", "checkout is failing",
+# "events are not reaching Kafka" — and none of them name a cause. A rule like
+# "payment-service CPU is high" fires on the wrong thing the moment the
+# architecture changes; a rule like "checkout p95 is over budget" survives.
+#
+# Two deliberate omissions:
+#
+#   * No rule per exception. Log-based alerting on individual exceptions is the
+#     thing doc 08 §7 explicitly warns against, and it pages on causes.
+#   * No "pod crash loop" rule: there are no pods yet. It arrives with Phase 10.
+#     Listed here rather than silently skipped so the gap is visible.
+#
+# Thresholds are the SLO from docs/phase-8-observability-baseline.md: checkout
+# p95 < 2 s and error rate < 1 %. `for:` durations are short because this is a
+# development stack where a human is watching; production would use longer
+# windows to avoid paging on a single slow minute.
+groups:
+  - name: checkout-slo
+    rules:
+      # The latency half of the SLO. Buckets come from
+      # management.metrics.distribution.percentiles-histogram — without that
+      # setting Micrometer exports no _bucket series and this rule silently
+      # matches nothing, which is the failure mode to watch for when copying it.
+      # NOTE: each vector selector is on a single line on purpose. PromQL does
+      # not accept a line break inside the braces of a selector, and the error it
+      # gives ("unexpected character: '}'") points at the line *after* the one
+      # that is actually wrong.
+      - alert: CheckoutLatencyBreach
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (
+              rate(http_server_requests_seconds_bucket{service="checkout-service", uri="/api/v1/checkout"}[5m])
+            )
+          ) > 2
+        for: 2m
+        labels:
+          severity: warning
+          slo: checkout_latency
+        annotations:
+          summary: "Checkout p95 is over its 2s budget"
+          description: "p95 checkout latency has been above 2s for 2 minutes. Users are waiting; no request has failed yet, so nothing else in this stack will have noticed."
+          runbook: "docs/phase-8-observability-baseline.md"
+
+      # The error half. Counts 5xx only: a 4xx is a business answer (a declined
+      # payment, a validation error) and alerting on it would page someone every
+      # time a customer's card was declined.
+      - alert: CheckoutErrorRateHigh
+        expr: |
+          sum(rate(http_server_requests_seconds_count{service="checkout-service", uri="/api/v1/checkout", status=~"5.."}[5m]))
+          /
+          sum(rate(http_server_requests_seconds_count{service="checkout-service", uri="/api/v1/checkout"}[5m])) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+          slo: checkout_errors
+        annotations:
+          summary: "More than 1% of checkouts are failing"
+          description: "Checkout 5xx rate has been above 1% for 2 minutes."
+
+  - name: dependency-health
+    rules:
+      # An open breaker is the system telling you a dependency is unusable —
+      # and that it has started *denying* calls rather than waiting on them.
+      # Worth its own alert because it changes the failure mode from slow to
+      # unavailable, and because it is the one signal that says "we have already
+      # given up on this dependency".
+      - alert: CircuitBreakerOpen
+        expr: resilience4j_circuitbreaker_state{state="open"} == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Circuit breaker {{ $labels.service }} -> {{ $labels.name }} is open"
+          description: "Calls to {{ $labels.name }} are being rejected without being attempted."
+
+      # Absence is a symptom too, and one no application-emitted metric can
+      # express: a dead service exports nothing, which is why this rule uses the
+      # scrape's own `up` and the label comes from the scrape config rather than
+      # from the application.
+      - alert: ServiceDown
+        expr: up{job="ecommerce-services"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} is not answering scrapes"
+          description: "Prometheus cannot reach {{ $labels.service }}; either it is down or its metrics endpoint is."
+
+  - name: events-and-storage
+    rules:
+      # The metric that covers the outbox's blind spot. A publisher that has
+      # stopped draining looks exactly like a healthy system from the outside:
+      # every request still succeeds. Age, not count — a backlog of one row that
+      # is an hour old is an incident; a backlog of fifty that is two seconds old
+      # is a busy afternoon.
+      - alert: OutboxBacklogStuck
+        expr: outbox_events_oldest_unpublished_age_seconds > 300
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} has unpublished outbox events older than 5 minutes"
+          description: "Events are being written but not reaching Kafka. Business requests still succeed, so nothing else will surface this."
+
+      - alert: KafkaConsumerLagHigh
+        expr: kafka_consumer_lag_aggregate > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.group }} is more than 100 messages behind"
+          description: "Consumers are falling behind producers; the async parts of the system are converging more slowly than they are diverging."
+
+      # Database saturation (doc 08 §7). Waiting for a connection is the signal
+      # that matters — a busy pool is normal, a queue is not.
+      - alert: DatabasePoolSaturated
+        expr: hikaricp_connections_pending > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} is queueing for database connections"
+          description: "Requests are waiting for a connection from the pool, which means the pool is the bottleneck."
+
+  - name: business-signals
+    rules:
+      # Business outcomes, deliberately separate from the error-rate rule. A
+      # spike in declines is not a system fault — it is a fact about customers,
+      # cards, or the mock provider's threshold — and merging it into the error
+      # rate would make both signals useless.
+      - alert: PaymentDeclineSpike
+        expr: |
+          sum(rate(payments_outcomes_total{status="FAILED"}[10m]))
+          /
+          sum(rate(payments_outcomes_total[10m])) > 0.25
+        for: 5m
+        labels:
+          severity: warning
+          kind: business
+        annotations:
+          summary: "More than 25% of payments are being declined"
+          description: "A business signal, not a system error — check whether it is demand, the provider threshold, or a real problem."
+
+      - alert: InventoryReservationFailureSpike
+        expr: |
+          sum(rate(inventory_reservations_total{outcome="insufficient_stock"}[10m]))
+          /
+          sum(rate(inventory_reservations_total[10m])) > 0.25
+        for: 5m
+        labels:
+          severity: warning
+          kind: business
+        annotations:
+          summary: "More than 25% of reservations are failing for lack of stock"
+          description: "Demand is outrunning stock, or stock is not being replenished. Checkout will be compensating."
+
+  - name: telemetry-health
+    rules:
+      # Watching the watcher. The collector is the single ingestion point for
+      # traces and logs, so if it starts refusing or dropping data, telemetry is
+      # being lost while every service still looks perfectly healthy — the one
+      # failure that would make every other alert untrustworthy.
+      - alert: TelemetryDropped
+        expr: |
+          rate(otelcol_receiver_refused_spans[5m]) > 0
+          or rate(otelcol_receiver_refused_log_records[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The OpenTelemetry Collector is refusing telemetry"
+          description: "Spans or logs are being rejected before storage; traces will have gaps."
+
+      - alert: TelemetryExporterQueueFilling
+        expr: otelcol_exporter_queue_size / otelcol_exporter_queue_capacity > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The collector's export queue to {{ $labels.exporter }} is nearly full"
+          description: "A backend is slow or unreachable and the collector is buffering; when the queue fills, telemetry is dropped."

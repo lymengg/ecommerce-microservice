@@ -1,0 +1,204 @@
+# Unit tests for the alert rules (Phase 8, ADR-021).
+#
+# "An alert that has never fired is untested" (docs/13 §3). There are two ways to
+# fix that: degrade a live system and watch, which is done once at the end of the
+# phase and is slow, flaky and impossible in CI; or test the rule logic against
+# synthetic series, which is what this file does. Both, in other words — this is
+# the part that runs on every build.
+#
+# Run:
+#   docker run --rm -v "$(pwd)/infra/prometheus:/etc/prometheus" \
+#     --entrypoint promtool prom/prometheus:v3.1.0 \
+#     test rules /etc/prometheus/rules-tests/ecommerce-slo_test.yml
+#
+# The bucket bounds are the real ones Micrometer emits for the HTTP timer
+# (1 ms * 1.048576^n, so 1.789569706 s then 2.147483647 s around the 2 s budget),
+# not invented round numbers — a test written against buckets the application
+# does not produce would pass while the rule matched nothing in production.
+
+rule_files:
+  - /etc/prometheus/rules/ecommerce-slo.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ------------------------------------------------------------------ latency
+  - name: checkout p95 over budget fires the latency alert
+    interval: 1m
+    input_series:
+      # 1000 requests/min, of which 900 land between 2.1 s and 5.7 s.
+      - series: 'http_server_requests_seconds_bucket{service="checkout-service",uri="/api/v1/checkout",le="1.789569706"}'
+        values: '0+100x10'
+      - series: 'http_server_requests_seconds_bucket{service="checkout-service",uri="/api/v1/checkout",le="2.147483647"}'
+        values: '0+100x10'
+      - series: 'http_server_requests_seconds_bucket{service="checkout-service",uri="/api/v1/checkout",le="5.726623061"}'
+        values: '0+1000x10'
+      - series: 'http_server_requests_seconds_bucket{service="checkout-service",uri="/api/v1/checkout",le="+Inf"}'
+        values: '0+1000x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: CheckoutLatencyBreach
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              slo: checkout_latency
+            exp_annotations:
+              summary: "Checkout p95 is over its 2s budget"
+              description: "p95 checkout latency has been above 2s for 2 minutes. Users are waiting; no request has failed yet, so nothing else in this stack will have noticed."
+              runbook: "docs/phase-8-observability-baseline.md"
+
+  - name: a healthy checkout does not fire the latency alert
+    interval: 1m
+    input_series:
+      - series: 'http_server_requests_seconds_bucket{service="checkout-service",uri="/api/v1/checkout",le="1.789569706"}'
+        values: '0+1000x10'
+      - series: 'http_server_requests_seconds_bucket{service="checkout-service",uri="/api/v1/checkout",le="2.147483647"}'
+        values: '0+1000x10'
+      - series: 'http_server_requests_seconds_bucket{service="checkout-service",uri="/api/v1/checkout",le="5.726623061"}'
+        values: '0+1000x10'
+      - series: 'http_server_requests_seconds_bucket{service="checkout-service",uri="/api/v1/checkout",le="+Inf"}'
+        values: '0+1000x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: CheckoutLatencyBreach
+        exp_alerts: []
+
+  # ------------------------------------------------------------------- errors
+  - name: checkout 5xx over 1 percent fires the error alert
+    interval: 1m
+    input_series:
+      - series: 'http_server_requests_seconds_count{service="checkout-service",uri="/api/v1/checkout",status="503"}'
+        values: '0+20x10'
+      - series: 'http_server_requests_seconds_count{service="checkout-service",uri="/api/v1/checkout",status="201"}'
+        values: '0+980x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: CheckoutErrorRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              slo: checkout_errors
+            exp_annotations:
+              summary: "More than 1% of checkouts are failing"
+              description: "Checkout 5xx rate has been above 1% for 2 minutes."
+
+  # The distinction the whole phase turns on: a declined payment is a 4xx and a
+  # business outcome, not a fault. If this test ever fails, someone has widened
+  # the rule to `status=~"4..|5.."` and the error alert has become a decline
+  # alert wearing a different name.
+  - name: business rejections alone do not fire the error alert
+    interval: 1m
+    input_series:
+      - series: 'http_server_requests_seconds_count{service="checkout-service",uri="/api/v1/checkout",status="409"}'
+        values: '0+500x10'
+      - series: 'http_server_requests_seconds_count{service="checkout-service",uri="/api/v1/checkout",status="201"}'
+        values: '0+500x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: CheckoutErrorRateHigh
+        exp_alerts: []
+
+  # --------------------------------------------------------- dependency health
+  - name: an open circuit breaker fires
+    interval: 1m
+    input_series:
+      - series: 'resilience4j_circuitbreaker_state{service="checkout-service",name="payment",state="open"}'
+        values: '0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CircuitBreakerOpen
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: checkout-service
+              name: payment
+              state: open
+            exp_annotations:
+              summary: "Circuit breaker checkout-service -> payment is open"
+              description: "Calls to payment are being rejected without being attempted."
+
+  - name: a service that stops answering scrapes fires
+    interval: 1m
+    input_series:
+      - series: 'up{job="ecommerce-services",service="payment-service",instance="host.docker.internal:8085"}'
+        values: '1 1 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: ecommerce-services
+              service: payment-service
+              instance: host.docker.internal:8085
+            exp_annotations:
+              summary: "payment-service is not answering scrapes"
+              description: "Prometheus cannot reach payment-service; either it is down or its metrics endpoint is."
+
+  # ------------------------------------------------------------ events/storage
+  - name: a stuck outbox fires, because age is the signal and count is not
+    interval: 1m
+    input_series:
+      - series: 'outbox_events_oldest_unpublished_age_seconds{service="order-service"}'
+        values: '0 0 400 400 400 400 400 400'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OutboxBacklogStuck
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: order-service
+            exp_annotations:
+              summary: "order-service has unpublished outbox events older than 5 minutes"
+              description: "Events are being written but not reaching Kafka. Business requests still succeed, so nothing else will surface this."
+
+  # The counter-case that justifies having two outbox series: a large but *fresh*
+  # backlog is a busy system, not a broken one. The count would have fired here.
+  - name: a large but fresh outbox backlog does not fire
+    interval: 1m
+    input_series:
+      - series: 'outbox_events_oldest_unpublished_age_seconds{service="order-service"}'
+        values: '0+2x10'
+      - series: 'outbox_events_unpublished{service="order-service"}'
+        values: '0+500x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: OutboxBacklogStuck
+        exp_alerts: []
+
+  # -------------------------------------------------------- business signals
+  - name: a payment decline spike fires as a business signal
+    interval: 1m
+    input_series:
+      - series: 'payments_outcomes_total{service="payment-service",status="FAILED"}'
+        values: '0+400x12'
+      - series: 'payments_outcomes_total{service="payment-service",status="SUCCEEDED"}'
+        values: '0+600x12'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PaymentDeclineSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: business
+            exp_annotations:
+              summary: "More than 25% of payments are being declined"
+              description: "A business signal, not a system error — check whether it is demand, the provider threshold, or a real problem."
+
+  # ------------------------------------------------------- telemetry health
+  - name: telemetry being refused by the collector fires
+    interval: 1m
+    input_series:
+      - series: 'otelcol_receiver_refused_spans{receiver="otlp",transport="grpc"}'
+        values: '0+10x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: TelemetryDropped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              receiver: otlp
+              transport: grpc
+            exp_annotations:
+              summary: "The OpenTelemetry Collector is refusing telemetry"
+              description: "Spans or logs are being rejected before storage; traces will have gaps."
