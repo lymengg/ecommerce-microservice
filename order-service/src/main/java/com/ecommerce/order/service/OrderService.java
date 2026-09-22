@@ -2,6 +2,7 @@ package com.ecommerce.order.service;
 
 import com.ecommerce.common.error.ConflictException;
 import com.ecommerce.common.error.NotFoundException;
+import com.ecommerce.common.observability.ApplicationMetrics;
 import com.ecommerce.common.outbox.OutboxService;
 import com.ecommerce.common.security.SecurityRoles;
 import com.ecommerce.common.security.SecurityUtils;
@@ -60,6 +61,7 @@ public class OrderService {
     private final OrderIdempotencyRecordRepository idempotencyRepository;
     private final CatalogClient catalogClient;
     private final OutboxService outboxService;
+    private final ApplicationMetrics metrics;
     private final BigDecimal taxRate;
 
     public OrderService(OrderRepository orderRepository,
@@ -68,6 +70,7 @@ public class OrderService {
                         OrderIdempotencyRecordRepository idempotencyRepository,
                         CatalogClient catalogClient,
                         OutboxService outboxService,
+                        ApplicationMetrics metrics,
                         @Value("${ecommerce.tax-rate:0.10}") BigDecimal taxRate) {
         this.orderRepository = orderRepository;
         this.orderItemRepository = orderItemRepository;
@@ -75,6 +78,7 @@ public class OrderService {
         this.idempotencyRepository = idempotencyRepository;
         this.catalogClient = catalogClient;
         this.outboxService = outboxService;
+        this.metrics = metrics;
         this.taxRate = taxRate;
     }
 
@@ -118,6 +122,9 @@ public class OrderService {
         payload.put("total", order.getTotal().toPlainString());
         payload.put("currency", order.getCurrency());
         outboxService.record("order", order.getId().toString(), "OrderCreated", payload);
+        // doc 08 §4 "order creation rate". Recorded after the outbox row, so a
+        // rolled-back creation never counts as an order.
+        metrics.orderCreated();
         return get(order.getId());
     }
 

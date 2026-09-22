@@ -1,0 +1,42 @@
+# Grafana datasources (Phase 8, ADR-021), provisioned from files rather than
+# clicked in. A datasource that only exists in someone's browser is not
+# reproducible; a fresh `docker compose up` should give a working Grafana.
+#
+# All three pillars are here on purpose: a slow checkout should be visible as a
+# metric, readable as a log line, and openable as a trace without changing tabs —
+# which is the whole reason the three backends share a correlation id.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      # Keeps the dashboard time range in step with the query range, so a
+      # $__rate_interval in a panel means what it looks like it means.
+      timeInterval: 15s
+      httpMethod: POST
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      # The link that makes logs and traces one story rather than two: Loki gets
+      # trace_id on every record from the OTel agent, and this tells Grafana how
+      # to turn it into a jump to the trace.
+      derivedFields:
+        - name: TraceID
+          matcherRegex: '"trace_id":"(\w+)"'
+          datasourceUid: jaeger
+          url: '$${__value.raw}'
+
+  - name: Jaeger
+    uid: jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686

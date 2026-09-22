@@ -29,6 +29,42 @@ logging:
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [${spring.application.name}] [trace=%X{trace_id:-},span=%X{span_id:-},corr=%X{correlationId:-}] %logger{36} - %msg%n"
 
+# Observability (Phase 8, ADR-021). The scrape endpoint and the probes are
+# exposed; everything else under /actuator is not, and the security chain
+# permits only these. show-details is `never` because the health endpoint is
+# unauthenticated — a health check must not leak database or disk detail to
+# anyone who can reach the port.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+      group:
+        # doc 08 §8: readiness must mean "this instance can receive traffic",
+        # not merely "the application context finished starting". A service whose
+        # database is unreachable can answer nothing useful, so it should be
+        # taken out of rotation rather than serve errors — liveness deliberately
+        # does NOT include db, because restarting a service cannot fix a database
+        # outage and would only remove the instances that could recover.
+        readiness:
+          include: readinessState,db
+  metrics:
+    tags:
+      environment: ${ENVIRONMENT:local}
+    distribution:
+      # Prometheus histogram buckets for the HTTP timer, so p95 can be computed
+      # with histogram_quantile. Without this Micrometer exports only count/sum/max
+      # and any percentile alert is impossible to write. Client-side percentiles
+      # are deliberately not used: a per-instance quantile cannot be aggregated
+      # across instances, which is exactly what an SLO needs to be.
+      percentiles-histogram:
+        http.server.requests: true
+
 server:
   port: ${SERVER_PORT:8082}
 

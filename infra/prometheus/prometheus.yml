@@ -1,0 +1,56 @@
+# Prometheus — the metric store and the alert evaluator (Phase 8, ADR-021).
+#
+# Scrape topology. The services run on the *host* in development (Phase 9 moves
+# them into containers), so their targets are host.docker.internal. The
+# collector runs in compose, so it is addressed by service name.
+#
+# Every service exposes its own /actuator/prometheus. That is a pull model, which
+# is why the OpenTelemetry agent is configured with otel.metrics.exporter=none:
+# pushing the same metrics over OTLP as well would create two series for every
+# measurement, and the dashboards would silently disagree with each other.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: local
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # The seven services, one target each, labelled with the service name so
+  # dashboards and alert rules can group by `service` instead of by host:port.
+  # `application` is also added by the app itself (management.metrics.tags), so
+  # the two must stay consistent — the label here is what makes a *missing*
+  # target obvious (up == 0 with a name) rather than a series that vanishes.
+  - job_name: ecommerce-services
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["host.docker.internal:8080"]
+        labels: { service: gateway-service, tier: edge }
+      - targets: ["host.docker.internal:8081"]
+        labels: { service: catalog-service, tier: service }
+      - targets: ["host.docker.internal:8082"]
+        labels: { service: cart-service, tier: service }
+      - targets: ["host.docker.internal:8083"]
+        labels: { service: inventory-service, tier: service }
+      - targets: ["host.docker.internal:8084"]
+        labels: { service: order-service, tier: service }
+      - targets: ["host.docker.internal:8085"]
+        labels: { service: payment-service, tier: service }
+      - targets: ["host.docker.internal:8086"]
+        labels: { service: checkout-service, tier: service }
+
+  # The collector's own metrics. It is the single ingestion point for traces and
+  # logs, so "the collector is dropping spans" is a first-class symptom: it means
+  # telemetry is being lost even though every service looks healthy.
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
+        labels: { service: otel-collector, tier: telemetry }
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels: { service: prometheus, tier: telemetry }

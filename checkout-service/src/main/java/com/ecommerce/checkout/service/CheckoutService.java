@@ -13,6 +13,7 @@ import com.ecommerce.checkout.dto.CheckoutResponse;
 import com.ecommerce.common.error.ConflictException;
 import com.ecommerce.common.error.InsufficientStockException;
 import com.ecommerce.common.error.ServiceUnavailableException;
+import com.ecommerce.common.observability.ApplicationMetrics;
 import com.ecommerce.common.resilience.Deadline;
 import com.ecommerce.common.resilience.ResilienceProperties;
 import io.opentelemetry.api.GlobalOpenTelemetry;
@@ -69,17 +70,20 @@ public class CheckoutService {
     private final InventoryClient inventoryClient;
     private final PaymentClient paymentClient;
     private final ResilienceProperties resilienceProperties;
+    private final ApplicationMetrics metrics;
 
     public CheckoutService(CartClient cartClient,
                            OrderClient orderClient,
                            InventoryClient inventoryClient,
                            PaymentClient paymentClient,
-                           ResilienceProperties resilienceProperties) {
+                           ResilienceProperties resilienceProperties,
+                           ApplicationMetrics metrics) {
         this.cartClient = cartClient;
         this.orderClient = orderClient;
         this.inventoryClient = inventoryClient;
         this.paymentClient = paymentClient;
         this.resilienceProperties = resilienceProperties;
+        this.metrics = metrics;
     }
 
     public CheckoutResponse checkout(CheckoutRequest request, UUID customerId, String idempotencyKey) {
@@ -135,7 +139,13 @@ public class CheckoutService {
         // cancelling the order would then destroy a paid order. The order is
         // left recoverable in PAYMENT_PENDING and the reconciliation job decides
         // from the authoritative payment state (ADR-020).
-        PaymentInfo payment = paymentClient.initiate(order.orderId(), "checkout:" + order.orderId());
+        PaymentInfo payment;
+        try {
+            payment = paymentClient.initiate(order.orderId(), "checkout:" + order.orderId());
+        } catch (ServiceUnavailableException ex) {
+            metrics.checkoutOutcome(ApplicationMetrics.CHECKOUT_UNAVAILABLE);
+            throw ex;
+        }
 
         if ("SUCCEEDED".equals(payment.status())) {
             if ("PAYMENT_PENDING".equals(order.status())) {
@@ -148,6 +158,7 @@ public class CheckoutService {
                 cartClient.markCheckedOut(request.cartId());
             }
             span.setAttribute("checkout.outcome", "PAID");
+            metrics.checkoutOutcome(ApplicationMetrics.CHECKOUT_PAID);
             return new CheckoutResponse(order.orderId(), payment.paymentId(), "PAID", payment.status());
         }
 
@@ -155,6 +166,10 @@ public class CheckoutService {
             compensate(order.orderId(), "PAYMENT_FAILED");
         }
         span.setAttribute("checkout.outcome", "PAYMENT_DECLINED");
+        // A decline is a business outcome, not a system error — which is exactly
+        // why it gets its own series instead of being lost among the 4xx in
+        // http.server.requests (ADR-021).
+        metrics.checkoutOutcome(ApplicationMetrics.CHECKOUT_PAYMENT_DECLINED);
         throw new ConflictException("Checkout failed: payment declined");
     }
 
@@ -169,11 +184,13 @@ public class CheckoutService {
                 inventoryClient.reserve(line.productId(), line.quantity(), orderId);
             }
         } catch (InsufficientStockException ex) {
+            metrics.checkoutOutcome(ApplicationMetrics.CHECKOUT_INSUFFICIENT_STOCK);
             compensate(orderId, "INSUFFICIENT_STOCK");
             throw ex;
         } catch (ServiceUnavailableException ex) {
             // The gap Phase 7 closes: without this the order stayed in PENDING
             // and the reservation was held until its TTL expired.
+            metrics.checkoutOutcome(ApplicationMetrics.CHECKOUT_UNAVAILABLE);
             compensate(orderId, "INVENTORY_UNAVAILABLE");
             throw ex;
         }
@@ -181,12 +198,14 @@ public class CheckoutService {
 
     private OrderInfo transitionOrCompensate(UUID orderId, String reason, Supplier<OrderInfo> transition) {
         if (Deadline.current().filter(Deadline::isExpired).isPresent()) {
+            metrics.checkoutOutcome(ApplicationMetrics.CHECKOUT_BUDGET_EXHAUSTED);
             compensate(orderId, "SAGA_BUDGET_EXHAUSTED");
             throw new ServiceUnavailableException("Checkout budget exhausted before advancing order " + orderId);
         }
         try {
             return transition.get();
         } catch (ServiceUnavailableException ex) {
+            metrics.checkoutOutcome(ApplicationMetrics.CHECKOUT_UNAVAILABLE);
             compensate(orderId, reason);
             throw ex;
         }

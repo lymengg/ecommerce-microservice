@@ -3,6 +3,7 @@ package com.ecommerce.order.reconciliation;
 import com.ecommerce.order.client.InventoryClient;
 import com.ecommerce.order.client.PaymentClient;
 import com.ecommerce.order.client.PaymentInfo;
+import com.ecommerce.common.observability.ApplicationMetrics;
 import com.ecommerce.order.client.ReservationInfo;
 import com.ecommerce.order.model.Order;
 import com.ecommerce.order.repository.OrderRepository;
@@ -59,19 +60,22 @@ public class OrderReconciliationService {
     private final InventoryClient inventoryClient;
     private final ReconciliationProperties properties;
     private final TransactionTemplate transactionTemplate;
+    private final ApplicationMetrics metrics;
 
     public OrderReconciliationService(OrderRepository orderRepository,
                                       OrderService orderService,
                                       PaymentClient paymentClient,
                                       InventoryClient inventoryClient,
                                       ReconciliationProperties properties,
-                                      TransactionTemplate transactionTemplate) {
+                                      TransactionTemplate transactionTemplate,
+                                      ApplicationMetrics metrics) {
         this.orderRepository = orderRepository;
         this.orderService = orderService;
         this.paymentClient = paymentClient;
         this.inventoryClient = inventoryClient;
         this.properties = properties;
         this.transactionTemplate = transactionTemplate;
+        this.metrics = metrics;
     }
 
     /**
@@ -89,18 +93,27 @@ public class OrderReconciliationService {
         for (UUID orderId : claimed) {
             try {
                 switch (repair(orderId)) {
-                    case COMPLETED -> completed++;
-                    case COMPENSATED -> compensated++;
+                    case COMPLETED -> {
+                        completed++;
+                        metrics.reconciliationOutcome(ApplicationMetrics.RECONCILIATION_COMPLETED);
+                    }
+                    case COMPENSATED -> {
+                        compensated++;
+                        metrics.reconciliationOutcome(ApplicationMetrics.RECONCILIATION_COMPENSATED);
+                    }
                     case DEFERRED -> {
                         deferred++;
+                        metrics.reconciliationOutcome(ApplicationMetrics.RECONCILIATION_DEFERRED);
                         defer(orderId, "payment still in flight");
                     }
                 }
             } catch (RuntimeException ex) {
                 deferred++;
+                metrics.reconciliationOutcome(ApplicationMetrics.RECONCILIATION_DEFERRED);
                 defer(orderId, ex.getClass().getSimpleName() + ": " + ex.getMessage());
             }
         }
+        metrics.reconciliationPass(claimed.size());
         log.info("Reconciliation pass: claimed={} completed={} compensated={} deferred={}",
                 claimed.size(), completed, compensated, deferred);
         return claimed.size();
@@ -170,6 +183,7 @@ public class OrderReconciliationService {
             if (attempts >= properties.getMaxAttempts()) {
                 log.error("Order {} could not be reconciled after {} attempts ({}); marking NEEDS_ATTENTION",
                         orderId, attempts, reason);
+                metrics.reconciliationOutcome(ApplicationMetrics.RECONCILIATION_NEEDS_ATTENTION);
                 orderRepository.recordReconciliationAttempt(orderId, null);
                 orderService.markNeedsAttention(orderId, "RECONCILIATION_FAILED: " + reason);
                 return;

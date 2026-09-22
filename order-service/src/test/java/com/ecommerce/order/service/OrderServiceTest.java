@@ -1,6 +1,8 @@
 package com.ecommerce.order.service;
 
 import com.ecommerce.common.error.ConflictException;
+import com.ecommerce.common.observability.ApplicationMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import com.ecommerce.common.outbox.OutboxService;
 import com.ecommerce.integration.TestSecurity;
 import com.ecommerce.order.client.CatalogClient;
@@ -46,7 +48,8 @@ class OrderServiceTest {
 
     private final OrderService orderService = new OrderService(
             orderRepository, orderItemRepository, historyRepository, idempotencyRepository,
-            catalogClient, outboxService, new BigDecimal("0.10"));
+            catalogClient, outboxService, new ApplicationMetrics(new SimpleMeterRegistry()),
+            new BigDecimal("0.10"));
 
     private final AtomicReference<Order> savedOrder = new AtomicReference<>();
     private final AtomicReference<OrderItem> savedItem = new AtomicReference<>();

@@ -1,21 +1,50 @@
-# Local development infrastructure.
-#
-# Postgres is intentionally NOT here: the existing manual flow (README.md)
-# runs it with `docker run` on host port 5433 because port 5432 is often taken
-# by a local Windows PostgreSQL. Phase 8 will fold everything into a full
-# local environment.
+# Local development infrastructure — the whole environment (Phase 8, ADR-021).
 #
 # Usage:
-#   docker compose up -d keycloak jaeger otel-collector kafka
-#   # then start services with KEYCLOAK_ISSUER_URI=http://localhost:8087/realms/ecommerce
+#   docker compose up -d
+#   # then start the seven services with DB_PORT=5433 (see README)
 #
-# Tracing (Phase 5): services export OTLP to otel-collector, which forwards to
-# Jaeger. Jaeger UI: http://localhost:16686
+# Postgres is here as of Phase 8. It used to be a `docker run` plus a `docker
+# exec psql -c "CREATE DATABASE ..."` in the README, which is exactly the kind of
+# setup step that gets skipped, mistyped, or forgotten on a new machine. It is on
+# host port 5433 because 5432 is often taken by a local Windows PostgreSQL, and
+# the databases are created by infra/postgres/init-databases.sql on first start.
+#
+# The observability stack (Phase 8):
+#   Prometheus  :9090   metrics + alert evaluation
+#   Grafana     :3000   dashboards (metrics, logs, traces in one place)
+#   Loki        :3100   logs, ingested over OTLP via the collector
+#   Jaeger      :16686  traces (Phase 5)
+#
+# Telemetry topology: services -> OTLP -> otel-collector -> Jaeger (traces) and
+# -> Loki (logs); metrics are pulled from each service's /actuator/prometheus.
+# The collector stays the single ingestion point, which is what keeps the trace
+# and log backends swappable without touching a service.
 #
 # Kafka (Phase 6, ADR-004): the event backbone. Domain events published from
 # each service's transactional outbox land here; consumers (order, inventory)
 # subscribe. See docs/06-event-kafka-specification.md.
 services:
+  # One database per service (ADR-003/011). Separate databases make "no
+  # cross-service SQL" a physical fact rather than a convention.
+  postgres:
+    image: postgres:16-alpine
+    # 5433, not 5432: the host's own PostgreSQL usually holds 5432.
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./infra/postgres/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
   # Kafka in KRaft mode — no ZooKeeper. KRaft became production-ready in Kafka
   # 3.3 and is the only mode from Kafka 4.x, so running ZooKeeper would be
   # learning a component the industry has already removed. Single node acting
@@ -96,5 +125,71 @@ services:
       - "127.0.0.1:4317:4317"    # OTLP/gRPC — used by the Java agent
       - "127.0.0.1:4318:4318"    # OTLP/HTTP — curl and manual debugging
       - "127.0.0.1:13133:13133"  # health_check extension
+      - "127.0.0.1:8888:8888"    # collector self-metrics, scraped by Prometheus
     depends_on:
       - jaeger
+      - loki
+
+  # Prometheus (Phase 8, ADR-021): metric storage and the alert evaluator.
+  # Alerts are evaluated here and visible at /alerts and /api/v1/alerts; there is
+  # deliberately no Alertmanager — in development there is nowhere to route a
+  # notification, and the thing worth testing is the *rule*, not the routing.
+  # Routing belongs with the production stack (Phase 10).
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    # The services run on the host in development, so Prometheus needs a route
+    # back out of the container. host-gateway is what makes that work on Linux
+    # too; Docker Desktop already provides host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Loki (Phase 8, ADR-021): logs, ingested over OTLP from the collector.
+  loki:
+    image: grafana/loki:3.4.2
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./infra/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+
+  # Grafana (Phase 8, ADR-021): the one place to look. Prometheus, Loki and
+  # Jaeger are all provisioned as datasources, so a slow checkout can be seen as
+  # a metric, read as a log, and opened as a trace without leaving the tab.
+  # Datasources and dashboards are provisioned from files, not clicked in — a
+  # dashboard that only exists in someone's browser is not documentation.
+  grafana:
+    image: grafana/grafana:11.5.2
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Development convenience: no login wall in front of local dashboards.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: dark
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+      - jaeger
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  loki-data:
+  grafana-data:

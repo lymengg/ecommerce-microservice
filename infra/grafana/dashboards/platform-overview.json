@@ -1,0 +1,282 @@
+{
+  "uid": "ecommerce-platform",
+  "title": "Platform overview",
+  "description": "The SLO view plus the signals that explain it. Every panel is a symptom: nothing here names a cause, so the dashboard survives a refactor. Thresholds are the SLO from docs/phase-8-observability-baseline.md.",
+  "tags": ["ecommerce", "slo"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "label": "Service",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(up{job=\"ecommerce-services\"}, service)", "refId": "A" },
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Checkout SLO",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkout p95 latency (budget 2s)",
+      "description": "The latency half of the SLO. Needs percentiles-histogram enabled on http.server.requests — without it there are no _bucket series and this panel is silently empty.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 2 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{service=\"checkout-service\", uri=\"/api/v1/checkout\"}[5m])))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_requests_seconds_bucket{service=\"checkout-service\", uri=\"/api/v1/checkout\"}[5m])))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkout error rate (budget 1%)",
+      "description": "5xx only. A declined payment is a 409 and belongs in the outcomes panel below, not here.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "error rate",
+          "expr": "100 * sum(rate(http_server_requests_seconds_count{service=\"checkout-service\", uri=\"/api/v1/checkout\", status=~\"5..\"}[5m])) / sum(rate(http_server_requests_seconds_count{service=\"checkout-service\", uri=\"/api/v1/checkout\"}[5m]))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkout outcomes (business, not errors)",
+      "description": "Why this exists next to the error rate: a rising decline rate is a fact about customers or the provider, and merging it into the error rate would make both signals useless.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "min": 0, "custom": { "lineWidth": 1, "fillOpacity": 20, "stacking": { "mode": "normal" } } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{outcome}}",
+          "expr": "sum by (outcome) (rate(checkout_saga_outcomes_total[5m]))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Service health: targets up",
+      "description": "The only signal that can express a service being *absent*: a dead service exports no metrics of its own, which is why this uses the scrape's up and a label from the scrape config.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "custom": { "lineWidth": 1, "fillOpacity": 20, "stacking": { "mode": "normal" } },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{service}}",
+          "expr": "up{job=\"ecommerce-services\"}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Services (RED)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate by service",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0, "custom": { "lineWidth": 1, "fillOpacity": 0 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{service}}", "expr": "sum by (service) (rate(http_server_requests_seconds_count{service=~\"$service\"}[5m]))" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "5xx rate by service",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0, "custom": { "lineWidth": 1, "fillOpacity": 0 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{service}} {{status}}", "expr": "sum by (service, status) (rate(http_server_requests_seconds_count{service=~\"$service\", status=~\"5..\"}[5m]))" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "p95 latency by service",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0, "custom": { "lineWidth": 1, "fillOpacity": 0 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{service}}", "expr": "histogram_quantile(0.95, sum by (le, service) (rate(http_server_requests_seconds_bucket{service=~\"$service\"}[5m])))" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Dependencies (Phase 7 guards, finally visible)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Circuit breaker state by dependency",
+      "description": "1 = the dependency is being denied service without an attempt. Phase 7 could only report this as a log line.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 27 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1, "custom": { "lineWidth": 2, "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{service}} -> {{name}}", "expr": "resilience4j_circuitbreaker_state{state=\"open\"}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Bulkhead saturation by dependency",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 27 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "lineWidth": 1, "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{service}} -> {{name}}",
+          "expr": "1 - (resilience4j_bulkhead_available_concurrent_calls / resilience4j_bulkhead_max_allowed_concurrent_calls)"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Retries by dependency",
+      "description": "The retry-amplification signal: a dependency that needs retries is struggling, and this is where that shows before the breaker opens.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 27 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "custom": { "lineWidth": 1, "fillOpacity": 0 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{service}} -> {{name}} {{kind}}", "expr": "sum by (service, name, kind) (rate(resilience4j_retry_calls_total{kind=~\"failed_with_retry|successful_with_retry\"}[5m]))" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Events, storage, JVM",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox backlog: count and age",
+      "description": "The outbox's blind spot. A publisher that stopped draining looks healthy from the outside — every request still succeeds — and only the age reveals it.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 36 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "custom": { "lineWidth": 1, "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{service}} unpublished", "expr": "outbox_events_unpublished" },
+        { "refId": "B", "legendFormat": "{{service}} oldest age (s)", "expr": "outbox_events_oldest_unpublished_age_seconds" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Kafka consumer lag",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 36 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "custom": { "lineWidth": 1, "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{group}}", "expr": "kafka_consumer_lag_aggregate" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Database pool utilisation",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 36 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "lineWidth": 1, "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{service}}", "expr": "hikaricp_connections_active / hikaricp_connections_max" },
+        { "refId": "B", "legendFormat": "{{service}} pending", "expr": "hikaricp_connections_pending" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Logs",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 },
+      "collapsed": false
+    },
+    {
+      "type": "logs",
+      "title": "Checkout errors and exceptions",
+      "description": "Logs in the same view as the metrics that flagged them, from Loki via the collector. Every line carries trace_id, so the trace is one click away.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 45 },
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{service_name=\"checkout-service\"} |~ \"(?i)error|exception|unavailable\""
+        }
+      ]
+    }
+  ]
+}

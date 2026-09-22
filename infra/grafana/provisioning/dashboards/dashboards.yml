@@ -1,0 +1,17 @@
+# Dashboard provisioning (Phase 8, ADR-021): load every dashboard JSON from the
+# mounted directory. The dashboards are version-controlled next to the code they
+# describe, so a panel that answers "why is checkout slow" is reviewable in the
+# same pull request as the change that made it slow.
+apiVersion: 1
+
+providers:
+  - name: ecommerce
+    orgId: 1
+    folder: E-commerce
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

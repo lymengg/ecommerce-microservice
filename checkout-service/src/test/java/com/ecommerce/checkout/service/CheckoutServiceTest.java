@@ -12,7 +12,10 @@ import com.ecommerce.checkout.dto.CheckoutResponse;
 import com.ecommerce.common.error.ConflictException;
 import com.ecommerce.common.error.InsufficientStockException;
 import com.ecommerce.common.error.ServiceUnavailableException;
+import com.ecommerce.common.observability.ApplicationMetrics;
 import com.ecommerce.common.resilience.ResilienceProperties;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -37,8 +40,10 @@ class CheckoutServiceTest {
     private final OrderClient orderClient = mock(OrderClient.class);
     private final InventoryClient inventoryClient = mock(InventoryClient.class);
     private final PaymentClient paymentClient = mock(PaymentClient.class);
-    private final CheckoutService checkoutService =
-            new CheckoutService(cartClient, orderClient, inventoryClient, paymentClient, new ResilienceProperties());
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    private final CheckoutService checkoutService = new CheckoutService(
+            cartClient, orderClient, inventoryClient, paymentClient,
+            new ResilienceProperties(), new ApplicationMetrics(meterRegistry));
 
     private final UUID cartId = UUID.randomUUID();
     private final UUID orderId = UUID.randomUUID();
@@ -72,6 +77,7 @@ class CheckoutServiceTest {
         // Phase 6c: the orchestrator no longer commits stock or marks the order
         // paid itself — the PaymentSucceeded -> order -> inventory events do.
         verify(cartClient).markCheckedOut(cartId);
+        assertThat(counter("paid")).isEqualTo(1.0);
     }
 
     @Test
@@ -148,6 +154,29 @@ class CheckoutServiceTest {
         verify(inventoryClient, never()).releaseByOrder(orderId);
         verify(orderClient, never()).cancel(any(), any());
         verify(cartClient, never()).markCheckedOut(cartId);
+    }
+
+    /**
+     * Phase 8 (ADR-021): the outcome series is what distinguishes a business
+     * decline from a system error. Both are 4xx/5xx on the wire, and only one of
+     * them should ever page anyone.
+     */
+    @Test
+    void recordsTheBusinessOutcomeSeparatelyFromTheHttpStatus() {
+        when(paymentClient.initiate(any(), any())).thenReturn(new PaymentInfo(
+                paymentId, orderId, "FAILED", new BigDecimal("22.00"), "USD", Instant.now()));
+
+        assertThatThrownBy(() -> checkoutService.checkout(new CheckoutRequest(cartId, null, null), customerId, null))
+                .isInstanceOf(ConflictException.class);
+
+        assertThat(counter("payment_declined")).isEqualTo(1.0);
+        assertThat(counter("paid")).isZero();
+    }
+
+    /** Zero when the outcome never happened: no meter is registered until it does. */
+    private double counter(String outcome) {
+        Counter counter = meterRegistry.find("checkout.saga.outcomes").tag("outcome", outcome).counter();
+        return counter == null ? 0 : counter.count();
     }
 
     @Test

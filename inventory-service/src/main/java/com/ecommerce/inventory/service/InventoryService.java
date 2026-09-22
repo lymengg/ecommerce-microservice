@@ -3,6 +3,7 @@ package com.ecommerce.inventory.service;
 import com.ecommerce.common.error.ConflictException;
 import com.ecommerce.common.error.InsufficientStockException;
 import com.ecommerce.common.error.NotFoundException;
+import com.ecommerce.common.observability.ApplicationMetrics;
 import com.ecommerce.common.outbox.OutboxService;
 import com.ecommerce.inventory.dto.ReservationRequest;
 import com.ecommerce.inventory.dto.ReservationResponse;
@@ -34,17 +35,20 @@ public class InventoryService {
     private final InventoryReservationRepository reservationRepository;
     private final InventoryMovementRepository movementRepository;
     private final OutboxService outboxService;
+    private final ApplicationMetrics metrics;
     private final Duration reservationTtl;
 
     public InventoryService(InventoryItemRepository itemRepository,
                             InventoryReservationRepository reservationRepository,
                             InventoryMovementRepository movementRepository,
                             OutboxService outboxService,
+                            ApplicationMetrics metrics,
                             @Value("${ecommerce.inventory.reservation-ttl:PT30M}") Duration reservationTtl) {
         this.itemRepository = itemRepository;
         this.reservationRepository = reservationRepository;
         this.movementRepository = movementRepository;
         this.outboxService = outboxService;
+        this.metrics = metrics;
         this.reservationTtl = reservationTtl;
     }
 
@@ -76,8 +80,13 @@ public class InventoryService {
         requireItem(request.productId());
         int updated = itemRepository.reserve(request.productId(), request.quantity());
         if (updated == 0) {
+            // doc 08 §4 names "inventory reservation failures" explicitly: a
+            // spike here is a business signal (demand outrunning stock), not a
+            // system error, and it must be visible without reading logs.
+            metrics.reservationOutcome(ApplicationMetrics.RESERVATION_INSUFFICIENT);
             throw new InsufficientStockException("Insufficient stock for product " + request.productId());
         }
+        metrics.reservationOutcome(ApplicationMetrics.RESERVATION_RESERVED);
         InventoryReservation reservation = reservationRepository.save(
                 new InventoryReservation(request.productId(), request.quantity(), request.orderId(), Instant.now().plus(reservationTtl))
         );
@@ -99,6 +108,7 @@ public class InventoryService {
         }
         itemRepository.release(reservation.getProductId(), reservation.getQuantity());
         reservation.release();
+        metrics.reservationOutcome(ApplicationMetrics.RESERVATION_RELEASED);
         recordMovement(reservation.getProductId(), MovementType.RELEASED, reservation.getQuantity());
         outboxService.record("inventory", reservation.getId().toString(), "InventoryReleased", Map.of(
                 "reservationId", reservation.getId().toString(),
@@ -117,6 +127,7 @@ public class InventoryService {
         }
         itemRepository.commit(reservation.getProductId(), reservation.getQuantity());
         reservation.commit();
+        metrics.reservationOutcome(ApplicationMetrics.RESERVATION_COMMITTED);
         recordMovement(reservation.getProductId(), MovementType.COMMITTED, reservation.getQuantity());
         outboxService.record("inventory", reservation.getId().toString(), "InventoryCommitted", Map.of(
                 "reservationId", reservation.getId().toString(),
@@ -163,6 +174,7 @@ public class InventoryService {
                 .forEach(reservation -> {
                     itemRepository.release(reservation.getProductId(), reservation.getQuantity());
                     reservation.expire();
+                    metrics.reservationOutcome(ApplicationMetrics.RESERVATION_EXPIRED);
                     recordMovement(reservation.getProductId(), MovementType.EXPIRED, reservation.getQuantity());
                     outboxService.record("inventory", reservation.getId().toString(), "InventoryExpired", Map.of(
                             "reservationId", reservation.getId().toString(),

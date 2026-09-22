@@ -2,6 +2,7 @@ package com.ecommerce.payment.service;
 
 import com.ecommerce.common.error.ConflictException;
 import com.ecommerce.common.error.NotFoundException;
+import com.ecommerce.common.observability.ApplicationMetrics;
 import com.ecommerce.common.outbox.OutboxService;
 import com.ecommerce.common.security.SecurityRoles;
 import com.ecommerce.common.security.SecurityUtils;
@@ -46,6 +47,7 @@ public class PaymentService {
     private final OrderClient orderClient;
     private final PaymentGateway paymentGateway;
     private final OutboxService outboxService;
+    private final ApplicationMetrics metrics;
 
     public PaymentService(PaymentRepository paymentRepository,
                           PaymentAttemptRepository attemptRepository,
@@ -54,7 +56,8 @@ public class PaymentService {
                           WebhookEventRepository webhookEventRepository,
                           OrderClient orderClient,
                           PaymentGateway paymentGateway,
-                          OutboxService outboxService) {
+                          OutboxService outboxService,
+                          ApplicationMetrics metrics) {
         this.paymentRepository = paymentRepository;
         this.attemptRepository = attemptRepository;
         this.transactionRepository = transactionRepository;
@@ -63,6 +66,7 @@ public class PaymentService {
         this.orderClient = orderClient;
         this.paymentGateway = paymentGateway;
         this.outboxService = outboxService;
+        this.metrics = metrics;
     }
 
     @Transactional
@@ -229,7 +233,14 @@ public class PaymentService {
         return payment;
     }
 
+    /**
+     * Records both the event and the metric for a payment outcome. Deliberately
+     * one method: the two must happen together, and every caller that changes a
+     * payment's status is already routed through here, so the metric cannot
+     * drift from the event or be double-counted (ADR-021).
+     */
     private void recordOutcome(Payment payment, PaymentStatus status) {
+        metrics.paymentOutcome(status.name());
         String eventType = status == PaymentStatus.SUCCEEDED ? "PaymentSucceeded" : "PaymentFailed";
         outboxService.record("payment", payment.getId().toString(), eventType, Map.of(
                 "paymentId", payment.getId().toString(),

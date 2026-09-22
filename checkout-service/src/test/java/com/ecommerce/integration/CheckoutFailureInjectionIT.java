@@ -114,8 +114,12 @@ class CheckoutFailureInjectionIT extends AbstractCheckoutIT {
                         """.formatted(java.util.UUID.randomUUID(), ORDER_ID))));
         WIRE_MOCK.stubFor(post(urlEqualTo("/internal/api/v1/orders/" + ORDER_ID + "/payment-pending"))
                 .willReturn(okJson(orderJson("PAYMENT_PENDING"))));
+        // 30 s, not 5 s: the point is that the saga returns *long* before the
+        // dependency would have. With a 5 s provider delay against a 5 s saga
+        // budget the two are indistinguishable, and the assertion below could
+        // not tell a bounded failure from an unbounded one.
         WIRE_MOCK.stubFor(post(urlEqualTo("/api/v1/payments"))
-                .willReturn(aResponse().withFixedDelay(5_000).withStatus(201)
+                .willReturn(aResponse().withFixedDelay(30_000).withStatus(201)
                         .withHeader("Content-Type", "application/json")
                         .withBody(paymentJson("SUCCEEDED"))));
         stubCompensation();
@@ -126,7 +130,15 @@ class CheckoutFailureInjectionIT extends AbstractCheckoutIT {
                 .andExpect(jsonPath("$.title").value("Service Unavailable"));
         long elapsedMs = (System.nanoTime() - start) / 1_000_000;
 
-        assertThat(elapsedMs).isLessThan(4_000);
+        // Bounded by the saga budget (5 s in this suite) plus at most one
+        // in-flight socket timeout — NOT by a tight number that happens to hold
+        // on an idle machine. The payment leg is last, so it may legitimately
+        // consume whatever is left of the budget; asserting less than that would
+        // make the test fail for a correct implementation under load, which is
+        // exactly what it did before this comment existed.
+        assertThat(elapsedMs)
+                .as("bounded by the saga budget, not by the 30s the dependency would have taken")
+                .isLessThan(6_000);
         WIRE_MOCK.verify(0, postRequestedFor(urlEqualTo("/api/v1/orders/" + ORDER_ID + "/cancel")));
         WIRE_MOCK.verify(0, postRequestedFor(urlEqualTo("/internal/api/v1/inventory/reservations/release-by-order")));
     }

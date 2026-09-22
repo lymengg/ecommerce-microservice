@@ -1,0 +1,52 @@
+# Loki — log storage for local development (Phase 8, ADR-021).
+#
+# Single binary, filesystem storage, no authentication. This is the local shape
+# only; production runs object storage with a retention policy.
+#
+# Logs arrive over OTLP from the OpenTelemetry Collector, not by scraping files
+# (see infra/otel/otel-collector-config.yaml). That keeps the collector as the
+# single ingestion point for all three pillars, and it is what lets a log line
+# carry its trace id — which is what makes "show me the logs for this trace"
+# a query instead of a grep.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # Required for OTLP ingestion: without it Loki rejects the structured metadata
+  # that carries trace_id/span_id alongside the log line, and the log-to-trace
+  # link is lost. This is the one setting that is easy to miss and produces a
+  # silently degraded result rather than an error.
+  allow_structured_metadata: true
+  # Development: accept out-of-order arrivals rather than rejecting them.
+  reject_old_samples: false
+  volume_enabled: true
+
+# No alert rules here on purpose: Prometheus owns alerting for this stack
+# (infra/prometheus/rules). Loki's ruler would be a second, competing place to
+# look — and doc 08 §7 asks for alerts on symptoms, which are metric-shaped.

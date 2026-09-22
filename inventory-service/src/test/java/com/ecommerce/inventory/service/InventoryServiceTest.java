@@ -3,6 +3,8 @@ package com.ecommerce.inventory.service;
 import com.ecommerce.common.error.ConflictException;
 import com.ecommerce.common.error.InsufficientStockException;
 import com.ecommerce.common.error.NotFoundException;
+import com.ecommerce.common.observability.ApplicationMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import com.ecommerce.common.outbox.OutboxService;
 import com.ecommerce.inventory.dto.ReservationRequest;
 import com.ecommerce.inventory.dto.ReservationResponse;
@@ -38,7 +40,8 @@ class InventoryServiceTest {
     private final InventoryMovementRepository movementRepository = mock(InventoryMovementRepository.class);
     private final OutboxService outboxService = mock(OutboxService.class);
     private final InventoryService inventoryService =
-            new InventoryService(itemRepository, reservationRepository, movementRepository, outboxService, Duration.ofMinutes(30));
+            new InventoryService(itemRepository, reservationRepository, movementRepository, outboxService,
+                    new ApplicationMetrics(new SimpleMeterRegistry()), Duration.ofMinutes(30));
 
     private InventoryItem item;
 

@@ -1,6 +1,8 @@
 package com.ecommerce.payment.service;
 
 import com.ecommerce.common.error.ConflictException;
+import com.ecommerce.common.observability.ApplicationMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import com.ecommerce.common.outbox.OutboxService;
 import com.ecommerce.integration.TestSecurity;
 import com.ecommerce.payment.client.OrderClient;
@@ -52,9 +54,11 @@ class PaymentServiceTest {
     private final PaymentGateway paymentGateway = mock(PaymentGateway.class);
     private final OutboxService outboxService = mock(OutboxService.class);
 
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
     private final PaymentService paymentService = new PaymentService(
             paymentRepository, attemptRepository, transactionRepository, refundRepository,
-            webhookEventRepository, orderClient, paymentGateway, outboxService);
+            webhookEventRepository, orderClient, paymentGateway, outboxService,
+            new ApplicationMetrics(meterRegistry));
 
     private final UUID orderId = UUID.randomUUID();
     private static final UUID CUSTOMER_ID = UUID.fromString("00000000-0000-0000-0000-0000000000f1");
