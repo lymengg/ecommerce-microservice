@@ -45,7 +45,7 @@ place recording knowledge that tutorials cannot give you.
 | ✅ | 4. Security (Keycloak/OAuth2) | 4 | — | done |
 | ✅ | 5. Observability — tracing only | 7 | pulled forward, narrowed | you cannot debug async flows without traces |
 | ✅ | 6. Kafka & event-driven | 5 | expanded | + CDC alternative, choreography, reconciliation |
-| **7** | **Resilience** | 6 | reordered after 6 | consumer resilience needs Kafka to exist |
+| ✅ | 7. Resilience | 6 | reordered after 6 | consumer resilience needs Kafka to exist |
 | **8** | **Observability — metrics/logs/alerts** | 7 | remainder | dashboards are only meaningful once there is async load |
 | **9** | **Containerization** | 8 | reframed | you already use Docker — this phase is *productionizing* it |
 | **10** | **Kubernetes + IaC** | 9 | time-boxed, +Terraform +secrets | add the two things doc 09 asks for but the roadmap omitted |
@@ -146,7 +146,16 @@ the event stream."
 **Gotcha to capture.** Everything: consumer group rebalancing, offset
 semantics, serialization, DLT metadata.
 
-### Phase 7 — Resilience
+### Phase 7 — Resilience ✅ DONE
+
+> **Implemented (2026-09-22).** Timeouts with a saga-wide deadline (ADR-018),
+> per-dependency Resilience4j circuit breakers, bounded jittered retries with an
+> explicit per-call retry policy (ADR-019), bulkheads + bounded pools
+> (ADR-017), and the reconciliation job (ADR-020). The break-first baseline was
+> skipped by request; the failure modes are instead pinned by
+> `ResilientRestClientTest` (common), `CheckoutFailureInjectionIT`,
+> `OrderReconciliationIT`, `PaymentFailureIT` and `DatabaseOutageIT`. See
+> `PROGRESS.md` for the gotchas found on the way.
 
 **Break it first.** Inject latency into one downstream service (add a sleep).
 Observe threads piling up in the caller, connection pools exhausting, and the

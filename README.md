@@ -59,6 +59,9 @@ code; there are no shared domain tables and no cross-service SQL (ADR-011).
 | checkout-service   | inventory  | `POST /internal/api/v1/inventory/reservations`    | reserve per line |
 | checkout-service   | inventory  | `POST /internal/api/v1/inventory/reservations/release-by-order` | release on failure |
 | checkout-service   | payment    | `POST /api/v1/payments` (Idempotency-Key)         | initiate payment |
+| order-service      | payment    | `GET /internal/api/v1/payments/by-order/{id}`     | reconciliation: authoritative payment state (Phase 7) |
+| order-service      | inventory  | `GET /internal/api/v1/inventory/reservations?orderId=` | reconciliation: authoritative reservation state (Phase 7) |
+| order-service      | inventory  | `POST /internal/api/v1/inventory/reservations/release-by-order` | reconciliation: release on compensation (Phase 7) |
 
 Every service-to-service call carries a Keycloak client-credentials token with
 the SERVICE realm role (see `ecommerce.security.service-client.*`); internal
@@ -152,6 +155,62 @@ saga — and all compensation — stays orchestrated. The reasoning is in ADR-01
 - **Service-to-service** — client-credentials tokens with the SERVICE role; `/internal/**` endpoints are SERVICE-only and unreachable through the gateway
 - **Edge hardening** — explicit CORS allowlist (no wildcards), stricter per-user rate limits on checkout/payment, provider webhooks allowlisted, JWT/decoder lazy init
 - **Token hygiene** — the `realm_access.roles` claim maps to `ROLE_*` authorities; tokens are never logged
+- **Resilience** — timeouts with a saga-wide deadline, per-dependency circuit breakers, bounded jittered retries, bulkheads (ADR-017/018/019); retries are opt-in per call, and the inventory reservation is idempotent on `(orderId, productId)` so it can be retried safely
+- **Reconciliation** — order-service scans for orders stranded in `PENDING`/`PAYMENT_PENDING` by a partial saga failure, asks payment- and inventory-service for the authoritative state, and completes or compensates them, ending in `NEEDS_ATTENTION` rather than looping (ADR-020)
+
+## Resilience (Phase 7)
+
+Every cross-service call goes through the same policy, built in `common` and
+applied by `RestClients`, so a service cannot accidentally skip it.
+
+```text
+RestClient call
+  └─ retry (only if the call opted in)      ← jittered exponential backoff, 3 attempts
+      └─ circuit breaker (per dependency)   ← CLOSED / OPEN / HALF_OPEN
+          └─ bulkhead (per dependency)      ← bounded concurrency, fails immediately when full
+              └─ Apache HttpClient 5        ← connect / connection-request / response timeouts,
+                 (bounded pool per target)     response timeout capped by the remaining saga budget
+```
+
+- **Per dependency, never global.** A breaker per target (`catalog`, `cart`,
+  `inventory`, `order`, `payment`) — a global one would let payment being down
+  stop inventory reads.
+- **Fail fast, and typed.** A dependency that cannot answer (timeout, connection
+  failure, pool or bulkhead exhaustion, open breaker, 5xx) becomes
+  `ServiceUnavailableException` → RFC 9457 `503`. A 4xx stays a 4xx.
+- **Retries are opt-in per call.** `GET`s retry by default; a state-changing call
+  retries only where the client asserts idempotency (`Retryable.yes`). 4xx is
+  never retried. See the table in ADR-019.
+- **A saga deadline, not just per-call limits.** `ecommerce.resilience.saga-budget`
+  (10 s) is enforced on the request thread; each call's response timeout is capped
+  at the time left, and a spent budget triggers compensation rather than a silent
+  truncation.
+- **The gateway has timeouts only** (`httpclient.connect-timeout`,
+  `httpclient.response-timeout`) — no retry filter, because retrying at the edge
+  would double-retry the same request at two layers (ADR-017).
+- **Compensation covers an unreachable dependency**, not just a business
+  rejection. Before Phase 7, an inventory-service that timed out left the order
+  stranded in `PENDING` with stock held.
+
+### Reconciliation
+
+A circuit breaker without reconciliation just fails faster. `order-service` runs a
+scheduled job (`ecommerce.reconciliation.*`) that claims orders stuck in
+`PENDING`/`PAYMENT_PENDING` past `stale-after` using
+`SELECT … FOR UPDATE SKIP LOCKED` plus a lease, reads the authoritative payment
+and reservation state from their owners, and then:
+
+| Authoritative payment state | Action |
+|---|---|
+| `SUCCEEDED` | **complete** — mark PAID, which re-emits `OrderConfirmed` and commits the reservations |
+| absent / `FAILED` / `CANCELLED` / refunded | **compensate** — release what is still RESERVED, cancel the order |
+| still in flight (`PENDING`, `PROCESSING`, …) | **defer** — compensating could destroy a paid order |
+| dependency unreachable | **defer** with backoff |
+
+Bounded by a batch cap, a per-order backoff and `max-attempts`; an order that
+cannot be repaired moves to the terminal `NEEDS_ATTENTION` state (an operator
+cancels it through the normal ADMIN path) instead of being retried forever. See
+ADR-020.
 
 ## Run (full stack locally)
 
@@ -355,6 +414,43 @@ service-account role mapping) and token relay end-to-end (requires Docker).
 | `ecommerce.security.service-client.client-id` | `service-client` | cart/order/payment/checkout | confidential client id |
 | `ecommerce.security.service-client.client-secret` | `dev-service-client-secret` | cart/order/payment/checkout | confidential client secret (env in prod) |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:3000` | gateway | explicit CORS origin allowlist |
+| `ecommerce.resilience.saga-budget` | `10s` | checkout | wall-clock budget for one checkout saga (ADR-018) |
+| `ecommerce.resilience.http.connect-timeout` | `300ms` | all with clients | TCP connect timeout |
+| `ecommerce.resilience.http.connection-request-timeout` | `300ms` | all with clients | time to lease a pooled connection |
+| `ecommerce.resilience.http.response-timeout` | `1500ms` | all with clients | socket read timeout (capped by the remaining saga budget) |
+| `ecommerce.resilience.http.max-connections-per-route` | `20` | all with clients | bounded pool per dependency |
+| `ecommerce.resilience.http.max-connections-total` | `100` | all with clients | bounded pool across a client's endpoints |
+| `ecommerce.resilience.retry.max-attempts` | `3` | all with clients | attempts including the first |
+| `ecommerce.resilience.retry.initial-backoff` | `100ms` | all with clients | first retry delay |
+| `ecommerce.resilience.retry.multiplier` | `2.0` | all with clients | exponential factor |
+| `ecommerce.resilience.retry.max-backoff` | `500ms` | all with clients | backoff cap |
+| `ecommerce.resilience.retry.jitter` | `0.5` | all with clients | randomisation fraction (anti retry-storm) |
+| `ecommerce.resilience.retry.retry-on-server-error` | `true` | all with clients | retry a 5xx (4xx is never retried) |
+| `ecommerce.resilience.circuit-breaker.sliding-window-size` | `20` | all with clients | breaker window |
+| `ecommerce.resilience.circuit-breaker.minimum-number-of-calls` | `10` | all with clients | calls before the rate is evaluated |
+| `ecommerce.resilience.circuit-breaker.failure-rate-threshold` | `50` | all with clients | % failures that opens the breaker |
+| `ecommerce.resilience.circuit-breaker.wait-duration-in-open-state` | `10s` | all with clients | how long the breaker stays OPEN |
+| `ecommerce.resilience.circuit-breaker.permitted-number-of-calls-in-half-open-state` | `3` | all with clients | probes before closing |
+| `ecommerce.resilience.bulkhead.max-concurrent-calls` | `20` | all with clients | in-flight calls allowed per dependency |
+| `ecommerce.resilience.bulkhead.max-wait-duration` | `0` | all with clients | queueing when full (0 = fail immediately) |
+| `ecommerce.resilience.dependencies.<name>.response-timeout` | — | per service | per-dependency override (e.g. `order: 3s`, `catalog: 1s`) |
+| `ecommerce.resilience.dependencies.<name>.retry-enabled` | `true` | per service | disable retries for a dependency |
+| `ecommerce.resilience.dependencies.<name>.max-attempts` | — | per service | per-dependency attempt cap |
+| `ecommerce.resilience.dependencies.<name>.max-concurrent-calls` | — | per service | per-dependency bulkhead size |
+| `ecommerce.resilience.dependencies.<name>.failure-rate-threshold` | — | per service | per-dependency breaker threshold |
+| `ecommerce.resilience.dependencies.<name>.wait-duration-in-open-state` | — | per service | per-dependency breaker open window |
+| `ecommerce.reconciliation.enabled` | `true` | order | enable/disable the reconciliation job (ADR-020) |
+| `ecommerce.reconciliation.interval-ms` | `60000` | order | how often a reconciliation pass runs |
+| `ecommerce.reconciliation.initial-delay-ms` | `30000` | order | delay before the first pass |
+| `ecommerce.reconciliation.stale-after` | `10m` | order | how long an order may sit stuck before it is a candidate |
+| `ecommerce.reconciliation.batch-size` | `50` | order | orders claimed per pass |
+| `ecommerce.reconciliation.lease` | `2m` | order | how long a claimed order is held from other instances |
+| `ecommerce.reconciliation.max-attempts` | `5` | order | attempts before `NEEDS_ATTENTION` |
+| `ecommerce.reconciliation.retry-backoff` | `5m` | order | base backoff for a failed repair (grows with attempts) |
+| `spring.cloud.gateway.server.webflux.httpclient.connect-timeout` | `1000` | gateway | edge connect timeout (ms) |
+| `spring.cloud.gateway.server.webflux.httpclient.response-timeout` | `15s` | gateway | edge response timeout; must exceed the saga budget |
+| `spring.cloud.gateway.server.webflux.httpclient.pool.max-connections` | `200` | gateway | edge connection pool |
+| `spring.cloud.gateway.server.webflux.httpclient.pool.acquire-timeout` | `1000` | gateway | edge pool acquire timeout (ms) |
 
 ## Endpoints (base `/api/v1`, all services)
 
@@ -391,6 +487,8 @@ gateway):
 | POST | `/internal/api/v1/inventory/reservations/{id}/release`, `/commit` | inventory | resolve reservation |
 | POST | `/internal/api/v1/inventory/reservations/commit-by-order` | inventory | commit all reservations of an order |
 | POST | `/internal/api/v1/inventory/reservations/release-by-order` | inventory | release all reservations of an order |
+| GET | `/internal/api/v1/inventory/reservations?orderId=` | inventory | authoritative reservation state (reconciliation, Phase 7) |
+| GET | `/internal/api/v1/payments/by-order/{orderId}` | payment | authoritative payment state (reconciliation, Phase 7) |
 | POST | `/internal/api/v1/orders/{id}/pending` | order | mark PENDING |
 | POST | `/internal/api/v1/orders/{id}/payment-pending` | order | mark PAYMENT_PENDING |
 | POST | `/internal/api/v1/orders/{id}/paid` | order | mark PAID |

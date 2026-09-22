@@ -69,13 +69,16 @@ Introduce database-per-service.
 - Retry strategy
 - Schema evolution
 
-## Phase 6 — Resilience
-- Timeouts
-- Circuit breakers
-- Bulkheads
-- Backoff
-- Failure injection
-- Reconciliation
+## Phase 6 — Resilience ✅ (delivered as "Phase 7 — Resilience" in the revised plan, docs/13; ADR-017…020)
+- Timeouts ✅ (connect / connection-request / response, plus a saga-wide deadline)
+- Circuit breakers ✅ (Resilience4j, one per dependency)
+- Bulkheads ✅ (semaphore per dependency + a bounded Apache HC5 pool per target)
+- Backoff ✅ (exponential + jitter, opt-in per call, never on 4xx)
+- Failure injection ✅ (doc 10 §7: payment timeout, provider failure, duplicate
+  webhook, database outage, Kafka outage, service restart, network timeout,
+  partial saga failure)
+- Reconciliation ✅ (scheduled job in order-service; completes or compensates
+  stranded orders, bounded, terminal `NEEDS_ATTENTION`)
 
 ## Phase 7 — Observability
 - OpenTelemetry

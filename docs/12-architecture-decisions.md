@@ -297,3 +297,298 @@ for a harder-to-reason-about one, with no benefit here.
   analytics) **and low-coupling propagation** where no one owns the whole flow.
 
 **Status:** Accepted, Phase 6.
+
+## ADR-017: Resilience4j in `common`, Per Dependency, Not at the Edge
+
+**Decision.** Implement timeouts, circuit breakers, retries and bulkheads with
+**Resilience4j** (`resilience4j-circuitbreaker`, `-retry`, `-bulkhead`) wired by
+an **auto-configuration in `common`**, and applied to every cross-service client
+through `RestClients`. One breaker, retry and bulkhead instance **per logical
+dependency** (`catalog`, `cart`, `inventory`, `order`, `payment`), resolved from
+`ecommerce.resilience.*`. The **gateway gets timeouts only** — no retry filter
+and no circuit breaker.
+
+**Why Resilience4j, not Spring Retry.** Spring Retry does retry and backoff well
+and nothing else; this phase needs a circuit breaker and a bulkhead as well, and
+mixing two libraries for one policy is worse than one library for three.
+Resilience4j is the industry standard for the whole set, is the implementation
+behind Spring Cloud CircuitBreaker, and exposes its state as Micrometer metrics —
+which is exactly the signal Phase 8 is asked to surface (doc 08 §4: breaker
+state, retry counts).
+
+**Why not `resilience4j-spring-boot3` (or Spring Cloud CircuitBreaker).** Both
+bind a *global* `resilience4j.*` namespace and build one registry per type. This
+project needs per-dependency instances driven from `ecommerce.resilience.*`, and
+it needs them to exist in **checkout-service**, which scans only
+`com.ecommerce.checkout` plus two `common` packages. The starter's annotations
+(`@CircuitBreaker`) are AOP-based and would be silently inert wherever the scan
+does not reach — the same trap that left checkout unsecured before Phase 4. So
+the core modules are used directly and the registries are built explicitly. The
+starter remains a reasonable choice for a codebase that already has Actuator and
+a conventional package layout; it is the wrong fit here.
+
+**Why an auto-configuration, not `@Component`s.** Same reason as
+`TracingAutoConfiguration` and `MessagingAutoConfiguration`: whether a service
+has circuit breakers must not depend on which packages it happens to scan. The
+decorators are applied by `RestClients`, so a service cannot forget them either —
+the policy is part of building a client, not something each client opts into.
+
+**Why per dependency, not global.** A single global breaker is the classic
+mistake: one failing dependency opens the circuit for *every* dependency, so
+payment being down would stop inventory reads. `ResilientRestClientTest` asserts
+the separation directly, and the per-dependency name is a shared constant
+(`Dependencies`) so the name a client registers under and the name in
+configuration cannot drift.
+
+**Why not at the edge.** The gateway is reactive and cannot share `common`'s
+servlet configuration, so it could only ever have a *second*, differently
+configured copy of the policy. More importantly, retrying at the edge would
+double-retry the same request at two layers: a retried checkout is a retried *set*
+of saga calls, and the inner layer already retried the idempotent ones. The edge
+therefore gets what only it can provide — a bound on how long a client waits
+(`response-timeout`, ADR-018) — and the service boundary keeps the
+per-dependency policy.
+
+**Failure classification.** Everything that means "the dependency could not
+answer" — connection failure, timeout, pool or bulkhead exhaustion, open breaker,
+and a 5xx that survived the retries — becomes `ServiceUnavailableException`,
+rendered as RFC 9457 `503`. A 4xx is left alone: it is a business answer and still
+travels the existing `RemoteExceptionMapper` path. This classification is what
+lets the saga distinguish "the system could not answer, clean up" from "the
+request was wrong".
+
+**Consequences.**
+- `resilience4j-micrometer` is an *optional* dependency of `common`, bound to a
+  `MeterRegistry` only if one exists. No service has Actuator yet, so the bean is
+  dormant and Phase 8 activates it by adding the dependency — no code change.
+- Breakers are per-service instances in the Spring context, so **integration
+  tests must reset them between tests**; a test that deliberately drives a
+  dependency to 5xx otherwise leaves the breaker OPEN for the next test class.
+  Both IT bases do this in `@AfterEach`, and it cost a debugging cycle to learn.
+- Retries interact with idempotency, which is its own decision: ADR-019.
+
+**Status:** Accepted, Phase 7.
+
+## ADR-018: The Timeout Budget
+
+**Decision.** Every HTTP call has connect, connection-request and response
+timeouts; a checkout saga additionally has a **wall-clock deadline**
+(`ecommerce.resilience.saga-budget`, default 10 s) enforced by `Deadline`. Each
+request's response timeout is capped at the *remaining* budget, and the saga
+refuses to start a step once the budget is spent, compensating instead. The
+gateway's response timeout (15 s) is the outermost bound.
+
+**The arithmetic, and where the numbers come from.**
+
+| Bound | Value | Why |
+|---|---|---|
+| connect timeout | 300 ms | same host, same network; a TCP handshake that takes longer is an outage |
+| connection-request timeout | 300 ms | bounds the wait for a pooled connection, which is what turns pool exhaustion into a fast typed failure |
+| response timeout (default) | 1.5 s | the slowest legitimate call, plus headroom |
+| — `catalog` | 1 s | a single indexed read, called once per order line |
+| — `cart` | 1 s | one read, one state write |
+| — `inventory` | 1.5 s | an atomic stock update that may contend |
+| — `order` | 3 s | creating an order re-prices **every line from catalog**, so catalog's budget nests inside this one |
+| — `payment` | 3 s | initiation reads the order and calls the provider |
+| retry attempts | 3 | try, retry twice |
+| retry backoff | 100 ms → ×2 → 500 ms max, 0.5 jitter | bounded, and jittered so a fleet that failed together does not retry together |
+| saga budget | 10 s | ~7 calls; a healthy saga is well under 1 s |
+| gateway response timeout | 15 s | must exceed the saga budget so a saga that is legitimately compensating is not cut off at the edge |
+
+The gotcha doc 13 predicts is real and is why this is written down: **a 3 s read
+timeout with 3 retries is already 9 s**, and six such calls is 54 s — far outside
+any budget a user would tolerate. Two things keep it bounded: the breaker opens
+after a handful of failures (so later calls fail fast rather than burning their
+full timeout), and the deadline caps each call at whatever is left.
+
+**Why a deadline and not only per-call limits.** Per-call limits cannot bound a
+saga — they bound each step independently, and the sum is unbounded. A
+`TimeLimiter` would be the idiomatic Resilience4j answer, but it only works on
+`CompletionStage`/async work; the saga is a blocking servlet flow, and wrapping it
+in a thread pool would move the thread pile-up rather than remove it. So the
+budget is an explicit deadline on the request thread, which is the honest
+mechanism for blocking code: `Deadline` is set once at the start of the saga,
+`ResilienceRequestInterceptor` refuses to start a call when it is spent, and
+`BudgetedHttpComponentsClientHttpRequestFactory` caps the response timeout at the
+remaining time so the last call cannot overrun by a whole socket timeout.
+
+**Nesting is the subtle part.** Timeouts compose: `checkout → payment` (3 s) must
+exceed `payment → order` (3 s), which must exceed `order → catalog` (1 s, once per
+line). A caller's timeout shorter than its callee's worst case turns a slow-but-
+successful call into a false timeout, which is worse than a slow success — the
+saga then compensates an order that was about to be fine. The per-dependency
+values above are ordered deliberately for that reason, and this is the place that
+ordering is recorded.
+
+**Consequences.**
+- Work without a deadline (the reconciliation job, startup calls) gets the
+  per-call timeouts only. That is correct: those are not user-facing and should
+  not inherit a user's patience.
+- The deadline is a `ThreadLocal`, so it does not survive a thread hop. That is
+  acceptable today because the saga is synchronous; an async saga would need the
+  budget passed explicitly.
+- A budget expiry mid-saga triggers **compensation**, not a silent truncation.
+
+**Status:** Accepted, Phase 7.
+
+## ADR-019: Retry Safety, and Making the Inventory Reservation Idempotent
+
+**Decision.** Retries are **opt-in per request**, not per service. The default is
+conservative: safe methods (`GET`/`HEAD`/`OPTIONS`) retry, everything else does
+not unless the client asserts the operation is idempotent with
+`Retryable.yes(...)`. A 4xx is never retried; connection failures, timeouts and
+5xx are. And `POST /internal/api/v1/inventory/reservations` **was made
+idempotent** rather than exempted from retries.
+
+**Why per request, not per service.** Retry safety is a property of the
+*operation*, not of the service it lives on. `GET /api/v1/cart/{id}/lines` is free
+to retry; `POST /api/v1/orders/{id}/pending` is a state transition that would be
+answered `409` on a repeat, so retrying it converts a slow call into a failure.
+Both live in services whose other calls *are* retryable. The HTTP method alone
+cannot express the difference either — order creation and payment initiation are
+POSTs that must be retried because they carry an `Idempotency-Key`, while the
+transition is a POST that must not be.
+
+So the client declares it, at the call site, and the declaration is reviewable:
+
+| Call | Retried? | Why |
+|---|---|---|
+| `GET` catalog product | yes (default) | pure read |
+| `GET` cart lines | yes (default) | pure read |
+| `POST` order creation | yes | `Idempotency-Key`; a replay returns the existing order |
+| `POST` payment initiation | yes | `Idempotency-Key`; a replay returns the existing payment |
+| `POST` inventory reserve | yes | made idempotent — see below |
+| `POST` inventory release-by-order | yes | a no-op when nothing is still RESERVED |
+| `POST` order pending / payment-pending | no | a state transition; a repeat is a `409` |
+| `POST` order cancel | no | a state transition |
+| `POST` cart checkout (close cart) | no | a state transition |
+
+**The inventory-reservation question.** Reserving stock was the one call in the
+system that could not be retried: it had no idempotency key, so a retry after a
+lost response would reserve the same stock twice and hold inventory that no order
+would ever release. Two options were open — add an `Idempotency-Key` header, or
+exempt it from retries. It was made idempotent, but **not with a client-supplied
+key**: the key is the natural one, `(orderId, productId)`, enforced by a partial
+unique index while the reservation is `RESERVED`. The reasoning:
+
+- One reservation per order line *is* the business rule, so the natural key needs
+  no new header and no client cooperation.
+- A client-supplied key can be defeated by the client — send a different key on
+  the retry and the guarantee is gone. The natural key cannot be defeated by
+  accident.
+- It is partial (`WHERE status = 'RESERVED'`) because a later saga attempt, or a
+  reconciliation repair, may legitimately reserve the same line again after the
+  first was released, committed or expired.
+
+`reserve` therefore looks up the live reservation for the pair first and returns
+it unchanged; the unique index is the backstop for two genuinely concurrent
+attempts. This is what lets the saga treat a retried reserve as free, which in
+turn is what makes the reconciliation job's repair path safe.
+
+**Why 4xx is never retried.** A `400`, `403` or `409` will not fix itself.
+Retrying it multiplies load on a dependency that is answering correctly, which is
+the retry amplification this phase exists to prevent.
+
+**Why jitter.** Three attempts with a fixed 100 ms backoff, issued by every caller
+that failed at the same instant, arrive at the same instant — a self-inflicted
+thundering herd. The jitter (0.5) spreads them.
+
+**Consequences.**
+- `Retryable` markers are assertions about idempotency. If one is wrong, the
+  failure mode is a duplicate side effect, so they deserve review attention; the
+  table above is the record.
+- Retries sit **outside** the circuit breaker, so each attempt must re-acquire a
+  bulkhead permit and pass the breaker. A retry storm therefore cannot bypass the
+  guards that exist to stop it — but it does mean one logical call contributes up
+  to three results to the breaker's window, which opens it sooner. That is
+  intended: a dependency that fails three attempts in a row is failing.
+
+**Status:** Accepted, Phase 7.
+
+## ADR-020: Reconciliation of Orders Stranded by a Partial Saga Failure
+
+**Decision.** A scheduled job in **order-service** — the service that owns order
+state — finds orders left in `PENDING` or `PAYMENT_PENDING` past a staleness
+threshold, asks **payment-service** and **inventory-service** for the
+authoritative state over REST, and then either **completes** the order (payment
+succeeded → mark PAID, which re-emits `OrderConfirmed` and commits the
+reservations through the normal path) or **compensates** it (release the
+reservations that are still RESERVED, cancel the order). It is bounded by a batch
+cap, a per-order backoff, and an attempt budget that ends in a terminal
+`NEEDS_ATTENTION` state.
+
+**Why this exists at all.** Doc 13 §3 is blunt about it: "This is the part
+everyone skips and production punishes." A circuit breaker without reconciliation
+just fails faster. Phase 7 adds timeouts and breakers so the saga stops *hanging*
+— but the saga can still fail after reserving stock and before a payment exists,
+and if the process dies mid-saga (or compensation itself fails because the
+dependency is still down), nothing in the system would ever notice. The order sits
+in `PENDING` forever and the stock reservation quietly expires at its TTL. Phase
+6's outbox guarantees events are not lost; it says nothing about a saga that never
+finished.
+
+**Which states are "stuck".** `PENDING` and `PAYMENT_PENDING` only. `DRAFT` is
+transient and harmless (no reservation can exist yet). `PAID` and beyond are
+terminal for this purpose. The threshold (`stale-after`, default 10 min) is
+deliberately **below inventory's reservation TTL** (30 min): if the job could not
+release stock before the TTL expired it would be repairing an order whose stock
+had already been released by expiry, which is a different and worse situation.
+
+**Where the truth comes from.** Order-service owns the order, but payment state
+belongs to payment-service and reservation state to inventory-service. The job
+asks each owner over REST (`GET /internal/api/v1/payments/by-order/{id}`,
+`GET /internal/api/v1/inventory/reservations?orderId=`) rather than joining across
+databases (ADR-003, ADR-011). Both endpoints are new, read-only, and SERVICE-only;
+the job runs as a service principal, which is the same trust boundary as the
+orchestrator (ADR-013).
+
+**Single-flight, and why not just a lock.** Claiming is
+`SELECT ... FOR UPDATE SKIP LOCKED` — each row goes to exactly one claimer and
+rows another instance is locking are skipped rather than waited for — and then a
+**lease**: the claiming transaction pushes `next_reconciliation_at` into the
+future, so two instances cannot work the same order. A plain row lock cannot be
+the whole answer, because the repair makes REST calls and must not hold a database
+lock for the duration of a network round trip. The lease is written by bulk update
+rather than through the entity on purpose: touching the entity fires `@PreUpdate`,
+which would move `updated_at` — the staleness clock the claim query reads — and
+push the order out of the candidate window for another full threshold after every
+pass. (That was a real bug, found by the attempt-budget test.)
+
+**Complete or compensate.** The rule is derived from the payment state:
+
+- payment `SUCCEEDED` → **complete**. Marking PAID re-emits `OrderConfirmed`, so
+  the inventory commit happens through the same choreography as the normal flow
+  instead of a second, parallel mechanism.
+- payment absent, `FAILED`, `CANCELLED`, or refunded → **compensate**: release
+  what is still RESERVED, then cancel.
+- payment still in flight (`PENDING`, `PROCESSING`, `REFUND_PENDING`) → **defer**.
+  Compensating here could destroy a paid order; looking again later costs nothing.
+- A dependency that cannot be reached → **defer** with backoff.
+
+**Bounded, and terminal.** Batch size caps one pass; a per-order backoff
+(`retry-backoff`, growing linearly with attempts) keeps a struggling dependency
+from being hammered; after `max-attempts` (5) the order moves to
+`NEEDS_ATTENTION`, which is terminal and therefore *visible* — the alternative is
+an order that cycles through the job forever and is noticed by nobody. An operator
+resolves it by cancelling it through the normal ADMIN path, which is why
+`NEEDS_ATTENTION → CANCELLED` is the one transition out of that state.
+
+**Idempotent, and safe alongside the normal flow.** Completion is a no-op when the
+order is already PAID; compensation only releases reservations that are still
+RESERVED, and cancelling an already-cancelled order is a no-op. Running the job
+while a saga is in progress simply finds nothing to do, because the order is
+younger than the threshold.
+
+**A race it accepts.** A payment could succeed *after* the job decided to
+compensate — a webhook landing late, say. The reservation TTL bounds the damage
+and the stale threshold makes it unlikely, but it is a real distributed-systems
+race, not something a lock can remove. The mitigation is that the job only
+compensates on a *settled* payment that is not SUCCEEDED, and the race is
+documented here rather than discovered later.
+
+**Observability.** Each pass logs a summary line
+(`claimed/completed/compensated/deferred`) and each repair logs its outcome, which
+is what Loki will pick up in Phase 8; the counters Phase 8 exports come from the
+same call sites.
+
+**Status:** Accepted, Phase 7.

@@ -1,15 +1,20 @@
 # Project Progress — session handoff
 
-Last updated: 2026-09-21 (Phase 6 Kafka/event-driven implemented and verified)
+Last updated: 2026-09-22 (Phase 7 Resilience implemented and verified)
 
-## Status: Phase 6 (Kafka & event-driven) — implemented and verified
+## Status: Phase 7 (Resilience) — implemented and verified
 
-Phases 4 and 5 are DONE and committed. Phase 6 is implemented and verified
-against a live stack: the transactional outbox now publishes, consumers are
-idempotent with bounded retry and a dead-letter topic, one saga leg is
-choreographed, and **one checkout is a single Jaeger trace across the seven
-services including the Kafka produce/consume boundary**. See "Phase 6 (Kafka &
-event-driven)" below for the detail and the gotchas found on the way.
+Phases 4, 5 and 6 are DONE and committed. Phase 7 is implemented: timeouts with
+a saga-wide deadline, per-dependency Resilience4j circuit breakers, bounded
+jittered retries with an explicit per-call retry policy, bulkheads with bounded
+connection pools, and the **reconciliation job** that finds and repairs orders a
+partial saga failure stranded. See "Phase 7 (resilience)" below for the detail
+and the gotchas found on the way. ADR-017…020 record the decisions.
+
+**The "break it first" baseline was skipped by request** (as Phase 5's was), so
+there are no before/after measurements. The failure modes are pinned by tests
+instead: `ResilientRestClientTest` (common, 12 cases), `CheckoutFailureInjectionIT`
+(7), `OrderReconciliationIT` (8), `PaymentFailureIT` (3), `DatabaseOutageIT` (1).
 
 ### Phase 4 record
 
@@ -332,6 +337,116 @@ unbroken across the broker (doc 13 §3 Phase 6, doc 06).
   stale jar behind (and `clean` fails with "being used by another process").
   Stop the services before rebuilding — this cost a full debugging cycle here.
 
+## Phase 7 (resilience) — implemented and verified
+
+Goal: stop a slow or failing dependency from taking the caller down, make
+retries safe, and **find and repair the orders a partial saga failure leaves
+behind** (doc 13 §3, ADR-017…020).
+
+### What is implemented
+
+- **Timeouts (7a, ADR-018).** `RestClients` now builds an Apache HC5 client with
+  connect / connection-request / response timeouts and a `PoolingHttpClient
+  ConnectionManager` bounded per dependency, instead of the bare
+  `new HttpComponentsClientHttpRequestFactory()` that had no timeouts at all.
+- **A timeout budget (7a).** `Deadline` is a `ThreadLocal` budget set once at the
+  start of the saga. `ResilienceRequestInterceptor` refuses to start a call once
+  it is spent; `BudgetedHttpComponentsClientHttpRequestFactory` caps each
+  request's response timeout at the time remaining. Budget: 10 s saga, 1–3 s
+  per dependency (nested deliberately — see the table in ADR-018), gateway
+  response timeout 15 s. The gateway also gets `httpclient` connect/response
+  timeouts and a bounded pool.
+- **Circuit breakers (7b, ADR-017).** Resilience4j core modules (not the
+  starter — it binds one global registry and is AOP-based, which checkout's
+  selective scan would silently miss), wired by `ResilienceAutoConfiguration` in
+  `common`, **one breaker per dependency** (`catalog`, `cart`, `inventory`,
+  `order`, `payment`). A 5xx counts as a failure via `recordResult`; a full
+  bulkhead does not. State transitions are logged.
+- **Retries (7b, ADR-019).** Exponential backoff with jitter, capped at 3
+  attempts, **opt-in per request** via `Retryable.yes/no` — GETs by default,
+  state-changing calls only where the client asserts idempotency. 4xx never
+  retried.
+- **Bulkheads (7c).** A semaphore bulkhead per dependency (fails immediately
+  when full, rather than queueing into the caller's thread pool) plus the
+  bounded HC5 pool.
+- **`reserveOrCompensate` gap closed (7b).** The saga now compensates when a
+  dependency is *unreachable*, not just when stock is insufficient. Everything
+  that means "could not answer" — timeout, connection failure, pool/bulkhead
+  exhaustion, open breaker, and a 5xx that survived the retries — is classified
+  as `ServiceUnavailableException` (503) by the interceptor, and the saga
+  compensates on it. Payment is deliberately excluded: a payment that cannot be
+  reached may in fact have been recorded, so the order is left recoverable for
+  reconciliation instead of being cancelled.
+- **Inventory reservation idempotency (7b, ADR-019).** `reserve` is idempotent
+  on the natural key `(orderId, productId)` while RESERVED (partial unique index
+  `uk_reservations_order_product_active`), which is what makes retrying it safe.
+  A client-supplied key was rejected as the weaker option — a client can defeat
+  its own key on retry.
+- **Reconciliation (7d, ADR-020).** `OrderReconciliationService` in
+  order-service: claims orders in `PENDING`/`PAYMENT_PENDING` older than
+  `stale-after` with `SELECT … FOR UPDATE SKIP LOCKED` **plus a lease**, reads
+  the authoritative payment state (new `GET /internal/api/v1/payments/by-order/{id}`)
+  and reservation state (new `GET /internal/api/v1/inventory/reservations?orderId=`),
+  then **completes** (payment SUCCEEDED → mark PAID, which re-emits
+  `OrderConfirmed` and commits stock through the normal path) or **compensates**
+  (release what is still RESERVED, cancel). Bounded by batch size, per-order
+  backoff and `max-attempts`, ending in the new terminal `NEEDS_ATTENTION`
+  state.
+- **Metrics hook (8 will finish).** `resilience4j-micrometer` is an *optional*
+  dependency of `common`, bound to a `MeterRegistry` only if one exists — dormant
+  until Phase 8 adds Actuator, then active with no code change.
+
+### Verified
+
+- `./mvnw test` → **91 unit tests** green (was 76; +12 resilience, +3 checkout
+  saga failure handling).
+- `./mvnw verify` → whole reactor green with Docker.
+- New failure-mode coverage: `ResilientRestClientTest` (timeouts fail fast, the
+  deadline refuses a call, retries cap at 3 and never retry 4xx, an unmarked
+  POST is not retried, backoff is bounded, the breaker opens and then does not
+  call the dependency at all, breakers are independent per dependency, a
+  saturated dependency fails fast without starving a healthy one, per-dependency
+  config overrides win), `CheckoutFailureInjectionIT` (inventory 5xx and a
+  dropped connection compensate; a slow inventory is bounded and compensates; a
+  payment timeout leaves the order recoverable; repeated failures open the
+  breaker and later checkouts fail fast; a cart read failure has no side
+  effects; the saga budget bounds a slow first call),
+  `OrderReconciliationIT` (compensates a stranded order, completes a
+  paid-but-stuck one, leaves fresh orders alone, is idempotent, a failed repair
+  is held by the lease, gives up into `NEEDS_ATTENTION`, defers an in-flight
+  payment, does not release already-resolved reservations), `PaymentFailureIT`
+  (a declined payment is charged once even when initiation is retried, a
+  different key still does not create a second payment, a duplicate webhook is
+  still deduplicated), `DatabaseOutageIT` (a paused PostgreSQL container fails
+  the request loudly and in bounded time, with no data loss).
+- Phase 6 guarantees re-verified: `OutboxPublisherIT` and the consumer ITs still
+  pass unchanged (Kafka outage → rows retained; duplicate/out-of-order/poison →
+  DLT).
+
+### Phase 7 gotchas (also in the list below)
+
+- **A `NotFoundException` catch clause does not catch a 404.** `RemoteExceptionMapper`
+  converts the raw `HttpClientErrorException` *after* the fact, so
+  `catch (NotFoundException ex)` never fires — the check has to be on the mapped
+  exception. Cost a debugging cycle in the reconciliation IT.
+- **Breakers are shared singletons in the shared Spring test context.** An IT
+  that drives a dependency to 5xx leaves the breaker OPEN for the next IT class,
+  which then sees a fast 503 instead of the behaviour it set up. Both IT bases
+  now reset every breaker in `@AfterEach`.
+- **Mutating an entity to take the reconciliation lease moves `updated_at`.**
+  `@PreUpdate` fires, and `updated_at` is the staleness clock the claim query
+  reads — so every pass pushed the order out of the candidate window for another
+  full threshold and the attempt budget could never be reached. Fixed by writing
+  the lease with a bulk update.
+- **`docker stop`/`docker start` on a Testcontainers PostgreSQL reassigns the
+  host port on Docker Desktop**, so the pool never recovers. The database-outage
+  test pauses the container instead, with a `socketTimeout` on the JDBC URL to
+  bound the failure.
+- **`-pl <service>` runs against the installed `common`.** After changing
+  `common` you must `./mvnw install -DskipTests -pl common` before an IT run, or
+  the service silently executes the previous `common`. This made a correct
+  5xx-classification change look like it had not been applied.
+
 ## Environment gotchas (learned the hard way — read before running)
 - **Port 5432 is taken by a local Windows PostgreSQL.** Start the Docker
   Postgres on a different host port and pass it to every service:
@@ -486,6 +601,37 @@ unbroken across the broker (doc 13 §3 Phase 6, doc 06).
   another process". A live-stack run therefore executed stale code and looked
   like a DLT bug. **Stop the services before rebuilding**, and check the jar
   mtime whenever behaviour does not match the source.
+- **`-pl <service>` resolves `common` from the local repository, not the
+  reactor.** After changing anything in `common`, run
+  `./mvnw install -DskipTests -pl common` before running a single module's ITs,
+  or the service executes the *previous* `common` jar. A correct change then
+  looks like it had no effect — here it made a 5xx-classification fix appear
+  unapplied.
+- **A `catch (NotFoundException)` clause never catches a 404.**
+  `RemoteExceptionMapper.from(...)` converts the raw `HttpClientErrorException`
+  into `NotFoundException` *after* the fact, so the catch has to be on the
+  mapped exception (`RuntimeException mapped = from(ex); if (mapped instanceof
+  NotFoundException) ...`). A 404 then silently propagates as an error instead
+  of being treated as "not found".
+- **Resilience4j breakers are singletons in the shared Spring test context.**
+  An IT that drives a dependency to 5xx leaves the breaker OPEN for the next IT
+  class, which then sees a fast 503 instead of the behaviour it set up — a
+  confusing, order-dependent failure. Both IT bases reset every breaker in
+  `@AfterEach`.
+- **Taking the reconciliation lease by mutating the entity moves `updated_at`.**
+  `@PreUpdate` fires on any entity update, and `updated_at` is the staleness
+  clock the claim query reads — so each pass pushed the order out of the
+  candidate window for another full `stale-after` period and the attempt budget
+  could never be reached. Write operational fields with a bulk update.
+- **`docker stop`/`docker start` on a Testcontainers PostgreSQL reassigns the
+  host port on Docker Desktop**, so the JDBC URL goes stale and the pool never
+  recovers. For a database-outage test, `pause`/`unpause` the container instead
+  and put `socketTimeout` on the JDBC URL so the failure is bounded rather than
+  a hang.
+- **`FOR UPDATE SKIP LOCKED` cannot be the whole single-flight story** when the
+  work after claiming is a network call: a row lock would be held for the
+  duration of the round trip. Claim, then take a *lease* (push
+  `next_reconciliation_at` into the future) in the same transaction.
 - **The shared `ProcessedEvent` entity is scanned by every DB service**
   (`@EntityScan("com.ecommerce")` + `ddl-auto: validate`), so all five
   `outbox_events` tables gained `correlation_id`/`trace_parent` and every DB
@@ -513,10 +659,11 @@ pattern prevents, measure it, then implement) — see doc 13 §1.
   The outbox tables exist per service; the checkout orchestrator is
   structured so the REST saga can be replaced by events without changing the
   checkout contract.
-- **Phase 7 — Resilience** (was Phase 6, moved after Kafka). Timeouts, circuit
-  breakers, retries, bulkheads (the RestClient/Apache HC5 foundation is
-  already in `common`), failure-injection tests (doc 10 §7), plus the
-  reconciliation job for inconsistent orders after a partial saga failure.
+- **Phase 7 — Resilience** ✅ DONE (was Phase 6, moved after Kafka). Timeouts
+  with a saga deadline, per-dependency circuit breakers, opt-in retries with
+  backoff+jitter, bulkheads and bounded pools, the doc 10 §7 failure-injection
+  tests, and the reconciliation job for orders stranded by a partial saga
+  failure (ADR-017…020).
 - **Phase 8 — Observability: metrics/logs/alerts** (remainder of old Phase 7).
   Micrometer → Prometheus, Grafana dashboards, Loki, alerts on symptoms
   (doc 08 §4, §6-7) — including Kafka consumer lag and outbox backlog.
