@@ -167,6 +167,18 @@ public class PaymentService {
         return toResponse(payment);
     }
 
+    /**
+     * Authoritative payment state for an order, read by the order reconciliation
+     * job (ADR-020). SERVICE-only, and read-only: reconciliation asks the owning
+     * service rather than reaching into its tables (ADR-003).
+     */
+    @Transactional(readOnly = true)
+    public PaymentResponse getByOrder(UUID orderId) {
+        return paymentRepository.findByOrderId(orderId)
+                .map(this::toResponse)
+                .orElseThrow(() -> new NotFoundException("No payment for order: " + orderId));
+    }
+
     @Transactional(readOnly = true)
     public PaymentResponse get(UUID paymentId) {
         Payment payment = paymentRepository.findById(paymentId)

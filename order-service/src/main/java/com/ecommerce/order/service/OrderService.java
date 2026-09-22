@@ -41,11 +41,17 @@ public class OrderService {
 
     static {
         TRANSITIONS.put(OrderStatus.DRAFT, Set.of(OrderStatus.PENDING, OrderStatus.CANCELLED));
-        TRANSITIONS.put(OrderStatus.PENDING, Set.of(OrderStatus.PAYMENT_PENDING, OrderStatus.CANCELLED));
-        TRANSITIONS.put(OrderStatus.PAYMENT_PENDING, Set.of(OrderStatus.PAID, OrderStatus.CANCELLED));
+        TRANSITIONS.put(OrderStatus.PENDING, Set.of(OrderStatus.PAYMENT_PENDING, OrderStatus.CANCELLED,
+                OrderStatus.NEEDS_ATTENTION));
+        TRANSITIONS.put(OrderStatus.PAYMENT_PENDING, Set.of(OrderStatus.PAID, OrderStatus.CANCELLED,
+                OrderStatus.NEEDS_ATTENTION));
         TRANSITIONS.put(OrderStatus.PAID, Set.of(OrderStatus.PROCESSING));
         TRANSITIONS.put(OrderStatus.PROCESSING, Set.of(OrderStatus.SHIPPED, OrderStatus.CANCELLED));
         TRANSITIONS.put(OrderStatus.SHIPPED, Set.of(OrderStatus.DELIVERED));
+        // Terminal, except for the operator escape hatch: an ADMIN may cancel a
+        // stuck order through the normal cancel endpoint once a human has looked
+        // at it (ADR-020).
+        TRANSITIONS.put(OrderStatus.NEEDS_ATTENTION, Set.of(OrderStatus.CANCELLED));
     }
 
     private final OrderRepository orderRepository;
@@ -157,6 +163,67 @@ public class OrderService {
                 "status", "PAID"
         ));
         return response;
+    }
+
+    /**
+     * Completes an order the normal flow left behind, because the authoritative
+     * payment state says it succeeded (ADR-020). Idempotent: a second pass over
+     * an already-PAID order is a no-op.
+     *
+     * <p>Marking PAID re-emits {@code OrderConfirmed}, which is the same path
+     * the normal choreography uses to commit the inventory reservations — so
+     * repair reuses the flow rather than inventing a second one.
+     *
+     * <p>Deliberately not authorization-checked: the caller is the scheduled
+     * reconciliation job, which has no {@code SecurityContext} and acts for the
+     * system rather than for a user. The REST surface is unchanged — a user
+     * still cannot reach an order they do not own.
+     */
+    @Transactional
+    public void reconcileComplete(UUID orderId) {
+        Order order = requireOrder(orderId);
+        if (order.getStatus() == OrderStatus.PAID) {
+            return;
+        }
+        if (order.getStatus() == OrderStatus.PENDING) {
+            // Defensive: a payment can only exist once the saga reached
+            // PAYMENT_PENDING, but if the transition was the step that failed
+            // the order still has to pass through it to be completable.
+            transition(order, OrderStatus.PAYMENT_PENDING, "Reconciliation: payment succeeded");
+        }
+        applyPaid(orderId);
+    }
+
+    /**
+     * Cancels an order the reconciliation job found no successful payment for
+     * (ADR-020). Idempotent, and bypasses object-level authorization for the
+     * same reason as {@link #reconcileComplete}.
+     */
+    @Transactional
+    public void reconcileCancel(UUID orderId, String reason) {
+        Order order = requireOrder(orderId);
+        if (order.getStatus() == OrderStatus.CANCELLED) {
+            return;
+        }
+        transition(order, OrderStatus.CANCELLED, reason);
+        outboxService.record("order", orderId.toString(), "OrderCancelled", Map.of(
+                "orderId", orderId.toString(),
+                "reason", reason
+        ));
+    }
+
+    /**
+     * Moves an order that could not be repaired to the terminal
+     * {@link OrderStatus#NEEDS_ATTENTION} state, so it stops consuming
+     * reconciliation attempts and becomes visible to a human (ADR-020).
+     */
+    @Transactional
+    public void markNeedsAttention(UUID orderId, String reason) {
+        Order order = requireOrder(orderId);
+        if (order.getStatus() != OrderStatus.PENDING && order.getStatus() != OrderStatus.PAYMENT_PENDING) {
+            return;
+        }
+        transition(order, OrderStatus.NEEDS_ATTENTION, reason);
     }
 
     @Transactional

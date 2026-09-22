@@ -52,6 +52,29 @@ public class Order {
     @Column(name = "updated_at", nullable = false, columnDefinition = "timestamptz")
     private Instant updatedAt;
 
+    /**
+     * How many times the reconciliation job has tried to repair this order
+     * (ADR-020). Paired with {@link #nextReconciliationAt}, it turns an
+     * unrepairable order into a bounded number of attempts followed by a
+     * terminal {@code NEEDS_ATTENTION} state rather than an infinite loop.
+     */
+    @Column(name = "reconciliation_attempts", nullable = false)
+    private int reconciliationAttempts;
+
+    /**
+     * Not before this instant may the reconciliation job pick the order up
+     * again. Doubles as the claim lease — the claiming transaction pushes it
+     * into the future so a second instance cannot work the same order — and as
+     * the per-order backoff after a failed repair.
+     *
+     * <p>Written by bulk update rather than through this entity
+     * ({@code OrderRepository.holdForReconciliation}), because touching the
+     * entity would fire {@code @PreUpdate} and move {@code updated_at}, which is
+     * the staleness clock the claim query reads.
+     */
+    @Column(name = "next_reconciliation_at", columnDefinition = "timestamptz")
+    private Instant nextReconciliationAt;
+
     @Version
     @Column(nullable = false)
     private long version;
@@ -121,6 +144,14 @@ public class Order {
 
     public Instant getUpdatedAt() {
         return updatedAt;
+    }
+
+    public int getReconciliationAttempts() {
+        return reconciliationAttempts;
+    }
+
+    public Instant getNextReconciliationAt() {
+        return nextReconciliationAt;
     }
 
     public void moveTo(OrderStatus newStatus) {
