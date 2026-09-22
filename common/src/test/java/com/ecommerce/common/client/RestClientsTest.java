@@ -1,5 +1,7 @@
 package com.ecommerce.common.client;
 
+import com.ecommerce.common.resilience.ClientResilience;
+import com.ecommerce.common.resilience.HttpLimits;
 import com.ecommerce.common.tracing.Correlation;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
@@ -10,6 +12,7 @@ import org.springframework.web.client.RestClient;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -24,6 +27,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * library keeps no test-scoped server dependency.
  */
 class RestClientsTest {
+
+    private static final HttpLimits LIMITS = new HttpLimits(
+            Duration.ofSeconds(1), Duration.ofSeconds(1), Duration.ofSeconds(2), 10, 50);
 
     private HttpServer server;
     private final AtomicReference<String> receivedCorrelationId = new AtomicReference<>();
@@ -70,7 +76,8 @@ class RestClientsTest {
         MDC.put(Correlation.MDC_KEY, "corr-456");
 
         RestClients.createWithServiceToken(
-                        "http://localhost:" + server.getAddress().getPort(), () -> "test-token")
+                        "http://localhost:" + server.getAddress().getPort(), () -> "test-token",
+                        ClientResilience.plain("test", LIMITS))
                 .get().uri("/ping").retrieve().toBodilessEntity();
 
         assertThat(receivedCorrelationId.get()).isEqualTo("corr-456");
@@ -78,6 +85,7 @@ class RestClientsTest {
     }
 
     private RestClient client() {
-        return RestClients.create("http://localhost:" + server.getAddress().getPort());
+        return RestClients.create("http://localhost:" + server.getAddress().getPort(),
+                ClientResilience.plain("test", LIMITS));
     }
 }

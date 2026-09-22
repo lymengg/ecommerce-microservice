@@ -2,6 +2,8 @@ package com.ecommerce.payment.client;
 
 import com.ecommerce.common.client.RemoteExceptionMapper;
 import com.ecommerce.common.client.RestClients;
+import com.ecommerce.common.resilience.ClientResilienceFactory;
+import com.ecommerce.common.resilience.Dependencies;
 import com.ecommerce.common.security.client.ClientCredentialsTokenProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -21,8 +23,10 @@ public class OrderClient {
     private final RestClient restClient;
 
     public OrderClient(@Value("${ecommerce.order.base-url}") String baseUrl,
-                       ClientCredentialsTokenProvider tokenProvider) {
-        this.restClient = RestClients.createWithServiceToken(baseUrl, tokenProvider::getToken);
+                       ClientCredentialsTokenProvider tokenProvider,
+                       ClientResilienceFactory resilience) {
+        this.restClient = RestClients.createWithServiceToken(baseUrl, tokenProvider::getToken,
+                resilience.forDependency(Dependencies.ORDER));
     }
 
     public OrderInfo getOrder(UUID orderId) {

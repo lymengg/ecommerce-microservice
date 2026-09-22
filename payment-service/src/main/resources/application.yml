@@ -47,6 +47,12 @@ ecommerce:
   outbox:
     poll-interval-ms: ${OUTBOX_POLL_INTERVAL_MS:1000}
     batch-size: ${OUTBOX_BATCH_SIZE:100}
+  # Phase 7 resilience (ADR-018): initiation calls order-service to read the
+  # authoritative order total, so the order budget must fit inside this one.
+  resilience:
+    dependencies:
+      order:
+        response-timeout: 3s
   order:
     base-url: ${ORDER_SERVICE_URL:http://localhost:8084}
   security:

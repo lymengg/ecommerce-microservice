@@ -27,6 +27,34 @@
             <groupId>org.apache.httpcomponents.client5</groupId>
             <artifactId>httpclient5</artifactId>
         </dependency>
+        <!-- Resilience4j (Phase 7, ADR-017). Core modules only, not
+             resilience4j-spring-boot3: the starter binds its own
+             `resilience4j.*` namespace and builds one global registry, whereas
+             this project needs per-dependency instances driven from
+             `ecommerce.resilience.*` and wired through an auto-configuration so
+             checkout-service (which scans selectively) gets them too. Versions
+             come from the Spring Cloud BOM imported in the parent. -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-circuitbreaker</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-retry</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-bulkhead</artifactId>
+        </dependency>
+        <!-- Optional: binds breaker/retry/bulkhead metrics to a Micrometer
+             registry when one is present. No service has Actuator yet (Phase 8
+             adds it), so this is inert today and lights up automatically once a
+             MeterRegistry exists. -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-micrometer</artifactId>
+            <optional>true</optional>
+        </dependency>
         <!-- OpenTelemetry API for manual instrumentation (CorrelationIdFilter,
              the checkout saga span). The Java agent supplies the implementation
              at runtime; without the agent these calls are no-ops. -->

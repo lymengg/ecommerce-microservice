@@ -2,6 +2,9 @@ package com.ecommerce.checkout.client;
 
 import com.ecommerce.common.client.RemoteExceptionMapper;
 import com.ecommerce.common.client.RestClients;
+import com.ecommerce.common.resilience.ClientResilienceFactory;
+import com.ecommerce.common.resilience.Dependencies;
+import com.ecommerce.common.resilience.Retryable;
 import com.ecommerce.common.security.client.ClientCredentialsTokenProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
@@ -19,6 +22,12 @@ import java.util.UUID;
  *
  * <p>Marking an order PAID is no longer done here: since Phase 6c that is
  * driven by the {@code PaymentSucceeded} event consumed by order-service.
+ *
+ * <p>Only creation is retried. The state transitions are not: a transition
+ * repeated after a lost response is rejected as an invalid transition (409)
+ * rather than absorbed, so retrying it would convert a slow call into a
+ * failure. The saga's compensation handles a transition that never landed
+ * (ADR-019).
  */
 @Component
 public class OrderClient {
@@ -26,13 +35,15 @@ public class OrderClient {
     private final RestClient restClient;
 
     public OrderClient(@Value("${ecommerce.order.base-url}") String baseUrl,
-                       ClientCredentialsTokenProvider tokenProvider) {
-        this.restClient = RestClients.createWithServiceToken(baseUrl, tokenProvider::getToken);
+                       ClientCredentialsTokenProvider tokenProvider,
+                       ClientResilienceFactory resilience) {
+        this.restClient = RestClients.createWithServiceToken(baseUrl, tokenProvider::getToken,
+                resilience.forDependency(Dependencies.ORDER));
     }
 
     public OrderInfo createOrder(OrderCreateRequest request, String idempotencyKey) {
         try {
-            var spec = restClient.post()
+            var spec = Retryable.yes(restClient.post())
                     .uri("/api/v1/orders")
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(request);
@@ -55,7 +66,7 @@ public class OrderClient {
 
     public OrderInfo cancel(UUID orderId, String reason) {
         try {
-            return restClient.post()
+            return Retryable.no(restClient.post())
                     .uri("/api/v1/orders/{orderId}/cancel", orderId)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(Map.of("reason", reason))
@@ -68,7 +79,7 @@ public class OrderClient {
 
     private OrderInfo transition(UUID orderId, String action) {
         try {
-            return restClient.post()
+            return Retryable.no(restClient.post())
                     .uri("/internal/api/v1/orders/{orderId}" + action, orderId)
                     .retrieve()
                     .body(OrderInfo.class);

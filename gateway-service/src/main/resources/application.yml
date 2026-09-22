@@ -14,6 +14,22 @@ spring:
     gateway:
       server:
         webflux:
+          # Phase 7 (ADR-018): the edge gets timeouts and a bounded connection
+          # pool, but deliberately no retry filter and no circuit breaker.
+          # Resilience belongs at the service boundary, where the policy is
+          # per-dependency; retrying here as well would double-retry the same
+          # request at two layers (see ADR-017 §"why not at the edge").
+          #
+          # The response timeout is the outermost bound of the timeout budget:
+          # it must exceed the saga budget (ecommerce.resilience.saga-budget,
+          # default 10s) so a saga that is legitimately compensating is not cut
+          # off mid-flight at the edge.
+          httpclient:
+            connect-timeout: ${GATEWAY_CONNECT_TIMEOUT_MS:1000}
+            response-timeout: ${GATEWAY_RESPONSE_TIMEOUT:15s}
+            pool:
+              max-connections: ${GATEWAY_MAX_CONNECTIONS:200}
+              acquire-timeout: ${GATEWAY_ACQUIRE_TIMEOUT_MS:1000}
           routes:
             - id: catalog-service
               uri: ${CATALOG_SERVICE_URL:http://localhost:8081}

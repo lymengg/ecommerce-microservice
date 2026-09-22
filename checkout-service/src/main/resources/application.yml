@@ -23,6 +23,27 @@ server:
   port: ${SERVER_PORT:8086}
 
 ecommerce:
+  # Phase 7 resilience (ADR-017/018). Only the numbers that differ from the
+  # shared defaults in ResilienceProperties are listed; the budget arithmetic
+  # lives in ADR-018.
+  resilience:
+    # Overall wall-clock budget for one checkout. Each call's response timeout
+    # is additionally capped at whatever is left of it, so the saga cannot
+    # overrun by a whole socket timeout.
+    saga-budget: ${SAGA_BUDGET:10s}
+    dependencies:
+      cart:
+        # A single indexed read, and the cart is closed with a state write.
+        response-timeout: 1s
+      order:
+        # Slowest dependency: creating an order re-prices every line from
+        # catalog-service, so its own budget must fit inside this one.
+        response-timeout: 3s
+      inventory:
+        response-timeout: 1500ms
+      payment:
+        # Payment initiation calls order-service and the provider.
+        response-timeout: 3s
   cart:
     base-url: ${CART_SERVICE_URL:http://localhost:8082}
   order:

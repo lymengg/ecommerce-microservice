@@ -49,6 +49,20 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * A dependency that could not answer is a 503, not a 500: it tells the
+     * caller to retry later, and it is the signal the checkout saga compensates
+     * on (Phase 7, ADR-017). Deliberately not the generic handler, which would
+     * report it as an unexpected server error.
+     */
+    @ExceptionHandler(ServiceUnavailableException.class)
+    public ProblemDetail handleServiceUnavailable(ServiceUnavailableException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage());
+        problem.setTitle("Service Unavailable");
+        problem.setType(URI.create("urn:problem:service-unavailable"));
+        return problem;
+    }
+
+    /**
      * Method-security (and service-level) access denials must not be swallowed
      * by the generic handler: rethrow so Spring Security's
      * ExceptionTranslationFilter maps them to the JSON 403 from

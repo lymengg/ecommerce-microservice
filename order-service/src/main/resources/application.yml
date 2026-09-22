@@ -59,6 +59,29 @@ server:
 
 ecommerce:
   tax-rate: ${TAX_RATE:0.10}
+  # Phase 7 resilience (ADR-017/018). Per-dependency response timeouts only;
+  # everything else uses the shared defaults.
+  resilience:
+    dependencies:
+      catalog:
+        # Called once per order line, so it must be the cheapest of the three.
+        response-timeout: 1s
+      payment:
+        response-timeout: 3s
+      inventory:
+        response-timeout: 1500ms
+  # Phase 7 reconciliation (ADR-020): find and repair orders a partial saga
+  # failure stranded. stale-after must stay below inventory's reservation TTL
+  # (PT30M) or stock would expire before the job could release it on purpose.
+  reconciliation:
+    enabled: ${RECONCILIATION_ENABLED:true}
+    interval-ms: ${RECONCILIATION_INTERVAL_MS:60000}
+    initial-delay-ms: ${RECONCILIATION_INITIAL_DELAY_MS:30000}
+    stale-after: ${RECONCILIATION_STALE_AFTER:10m}
+    batch-size: ${RECONCILIATION_BATCH_SIZE:50}
+    lease: ${RECONCILIATION_LEASE:2m}
+    max-attempts: ${RECONCILIATION_MAX_ATTEMPTS:5}
+    retry-backoff: ${RECONCILIATION_RETRY_BACKOFF:5m}
   outbox:
     # How often the publisher drains outbox_events to Kafka (ADR-009/015).
     poll-interval-ms: ${OUTBOX_POLL_INTERVAL_MS:1000}
@@ -66,6 +89,12 @@ ecommerce:
     batch-size: ${OUTBOX_BATCH_SIZE:100}
   catalog:
     base-url: ${CATALOG_SERVICE_URL:http://localhost:8081}
+  # Read-only, for the reconciliation job (ADR-020): order-service asks the
+  # owning services for authoritative state instead of reading their tables.
+  payment:
+    base-url: ${PAYMENT_SERVICE_URL:http://localhost:8085}
+  inventory:
+    base-url: ${INVENTORY_SERVICE_URL:http://localhost:8083}
   security:
     service-client:
       enabled: true

@@ -1,2 +1,4 @@
 com.ecommerce.common.tracing.TracingAutoConfiguration
 com.ecommerce.common.messaging.MessagingAutoConfiguration
+com.ecommerce.common.resilience.ResilienceAutoConfiguration
+com.ecommerce.common.resilience.ResilienceMetricsAutoConfiguration

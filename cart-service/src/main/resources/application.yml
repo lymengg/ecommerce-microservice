@@ -33,6 +33,11 @@ server:
   port: ${SERVER_PORT:8082}
 
 ecommerce:
+  # Phase 7 resilience (ADR-018): catalog is a single indexed read.
+  resilience:
+    dependencies:
+      catalog:
+        response-timeout: 1s
   catalog:
     base-url: ${CATALOG_SERVICE_URL:http://localhost:8081}
   security:
