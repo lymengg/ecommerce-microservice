@@ -12,15 +12,21 @@ import com.ecommerce.checkout.dto.CheckoutRequest;
 import com.ecommerce.checkout.dto.CheckoutResponse;
 import com.ecommerce.common.error.ConflictException;
 import com.ecommerce.common.error.InsufficientStockException;
+import com.ecommerce.common.error.ServiceUnavailableException;
+import com.ecommerce.common.resilience.Deadline;
+import com.ecommerce.common.resilience.ResilienceProperties;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.api.trace.Tracer;
 import io.opentelemetry.context.Scope;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 /**
  * Checkout orchestration (saga). Validates the cart, prices the order from the
@@ -35,9 +41,20 @@ import java.util.UUID;
  * commit the reservations. The checkout contract (request/response shape) is
  * unchanged, but the order and stock converge asynchronously — see ADR-016 for
  * the orchestration-vs-choreography comparison.
+ *
+ * <p>Phase 7 adds two things. First, a saga-wide {@link Deadline} (ADR-018):
+ * the saga refuses to start a step it cannot finish rather than spending its
+ * whole allowance on one call. Second, compensation for an <em>unreachable</em>
+ * dependency, not just a business rejection (ADR-017). Before this, only
+ * {@link InsufficientStockException} triggered compensation, so an
+ * inventory-service that timed out left the order stranded in {@code PENDING}
+ * with stock still held. A dependency that could not answer is now
+ * indistinguishable from one that said no, as far as cleanup is concerned.
  */
 @Service
 public class CheckoutService {
+
+    private static final Logger log = LoggerFactory.getLogger(CheckoutService.class);
 
     /**
      * Resolved through {@link GlobalOpenTelemetry} so the tracer is the one the
@@ -51,15 +68,18 @@ public class CheckoutService {
     private final OrderClient orderClient;
     private final InventoryClient inventoryClient;
     private final PaymentClient paymentClient;
+    private final ResilienceProperties resilienceProperties;
 
     public CheckoutService(CartClient cartClient,
                            OrderClient orderClient,
                            InventoryClient inventoryClient,
-                           PaymentClient paymentClient) {
+                           PaymentClient paymentClient,
+                           ResilienceProperties resilienceProperties) {
         this.cartClient = cartClient;
         this.orderClient = orderClient;
         this.inventoryClient = inventoryClient;
         this.paymentClient = paymentClient;
+        this.resilienceProperties = resilienceProperties;
     }
 
     public CheckoutResponse checkout(CheckoutRequest request, UUID customerId, String idempotencyKey) {
@@ -74,6 +94,7 @@ public class CheckoutService {
                 .setAttribute("checkout.cart_id", request.cartId().toString())
                 .setAttribute("checkout.currency", request.currency())
                 .startSpan();
+        Deadline.start(resilienceProperties.getSagaBudget());
         try (Scope ignored = span.makeCurrent()) {
             return executeSaga(request, customerId, idempotencyKey, span);
         } catch (RuntimeException ex) {
@@ -81,6 +102,7 @@ public class CheckoutService {
             span.setStatus(StatusCode.ERROR, ex.getClass().getSimpleName());
             throw ex;
         } finally {
+            Deadline.clear();
             span.end();
         }
     }
@@ -99,11 +121,20 @@ public class CheckoutService {
         span.setAttribute("checkout.order_id", order.orderId().toString());
 
         if ("DRAFT".equals(order.status())) {
-            order = orderClient.markPending(order.orderId());
-            reserveOrCompensate(lines, order.orderId());
-            order = orderClient.markPaymentPending(order.orderId());
+            UUID orderId = order.orderId();
+            order = transitionOrCompensate(orderId, "INVENTORY_UNAVAILABLE",
+                    () -> orderClient.markPending(orderId));
+            reserveOrCompensate(lines, orderId);
+            order = transitionOrCompensate(orderId, "INVENTORY_UNAVAILABLE",
+                    () -> orderClient.markPaymentPending(orderId));
         }
 
+        // No compensation on a payment failure, deliberately. Initiation is
+        // idempotent and already retried by the resilience layer; if it still
+        // cannot be reached, the payment may in fact have been recorded, and
+        // cancelling the order would then destroy a paid order. The order is
+        // left recoverable in PAYMENT_PENDING and the reconciliation job decides
+        // from the authoritative payment state (ADR-020).
         PaymentInfo payment = paymentClient.initiate(order.orderId(), "checkout:" + order.orderId());
 
         if ("SUCCEEDED".equals(payment.status())) {
@@ -121,22 +152,63 @@ public class CheckoutService {
         }
 
         if ("PAYMENT_PENDING".equals(order.status())) {
-            inventoryClient.releaseByOrder(order.orderId());
-            orderClient.cancel(order.orderId(), "PAYMENT_FAILED");
+            compensate(order.orderId(), "PAYMENT_FAILED");
         }
         span.setAttribute("checkout.outcome", "PAYMENT_DECLINED");
         throw new ConflictException("Checkout failed: payment declined");
     }
 
+    /**
+     * Reserves every line, compensating the whole order if any line cannot be
+     * reserved — whether because stock is genuinely insufficient or because
+     * inventory-service could not answer at all (ADR-017).
+     */
     private void reserveOrCompensate(List<CartLineInfo> lines, UUID orderId) {
         try {
             for (CartLineInfo line : lines) {
                 inventoryClient.reserve(line.productId(), line.quantity(), orderId);
             }
         } catch (InsufficientStockException ex) {
-            inventoryClient.releaseByOrder(orderId);
-            orderClient.cancel(orderId, "INSUFFICIENT_STOCK");
+            compensate(orderId, "INSUFFICIENT_STOCK");
             throw ex;
+        } catch (ServiceUnavailableException ex) {
+            // The gap Phase 7 closes: without this the order stayed in PENDING
+            // and the reservation was held until its TTL expired.
+            compensate(orderId, "INVENTORY_UNAVAILABLE");
+            throw ex;
+        }
+    }
+
+    private OrderInfo transitionOrCompensate(UUID orderId, String reason, Supplier<OrderInfo> transition) {
+        if (Deadline.current().filter(Deadline::isExpired).isPresent()) {
+            compensate(orderId, "SAGA_BUDGET_EXHAUSTED");
+            throw new ServiceUnavailableException("Checkout budget exhausted before advancing order " + orderId);
+        }
+        try {
+            return transition.get();
+        } catch (ServiceUnavailableException ex) {
+            compensate(orderId, reason);
+            throw ex;
+        }
+    }
+
+    /**
+     * Best-effort compensation. Each step is independent and its failure is
+     * logged, never rethrown: the original failure is the one the caller must
+     * see, and a compensation that cannot run (inventory still unreachable) is
+     * picked up by the reservation TTL and by reconciliation (ADR-020).
+     */
+    private void compensate(UUID orderId, String reason) {
+        try {
+            inventoryClient.releaseByOrder(orderId);
+        } catch (RuntimeException ex) {
+            log.warn("Could not release reservations for order {} during compensation: {}",
+                    orderId, ex.getMessage());
+        }
+        try {
+            orderClient.cancel(orderId, reason);
+        } catch (RuntimeException ex) {
+            log.warn("Could not cancel order {} during compensation: {}", orderId, ex.getMessage());
         }
     }
 }

@@ -1,7 +1,9 @@
 package com.ecommerce.integration;
 
+import com.ecommerce.common.resilience.ClientResilienceFactory;
 import com.ecommerce.common.security.KeycloakJwtAuthoritiesConverter;
 import com.github.tomakehurst.wiremock.WireMockServer;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -52,6 +54,9 @@ abstract class AbstractCheckoutIT {
     @Autowired
     private MockMvc mockMvc;
 
+    @Autowired
+    private ClientResilienceFactory resilienceFactory;
+
     @DynamicPropertySource
     static void clientProperties(DynamicPropertyRegistry registry) {
         String baseUrl = "http://localhost:" + WIRE_MOCK.port();
@@ -61,6 +66,19 @@ abstract class AbstractCheckoutIT {
         registry.add("ecommerce.payment.base-url", () -> baseUrl);
         registry.add("ecommerce.security.service-client.token-uri",
                 () -> "http://localhost:" + WIRE_MOCK.port() + "/token");
+        // Phase 7: shrink the resilience budget so failure-injection tests run in
+        // milliseconds instead of seconds. The production numbers (and the
+        // arithmetic that keeps them inside each other) are asserted in
+        // ResilientRestClientTest and recorded in ADR-018; what matters here is
+        // the *behaviour*, and behaviour does not depend on the magnitude.
+        registry.add("ecommerce.resilience.saga-budget", () -> "5s");
+        registry.add("ecommerce.resilience.retry.max-attempts", () -> "2");
+        registry.add("ecommerce.resilience.retry.initial-backoff", () -> "10ms");
+        registry.add("ecommerce.resilience.retry.max-backoff", () -> "20ms");
+        registry.add("ecommerce.resilience.dependencies.cart.response-timeout", () -> "500ms");
+        registry.add("ecommerce.resilience.dependencies.order.response-timeout", () -> "2s");
+        registry.add("ecommerce.resilience.dependencies.inventory.response-timeout", () -> "500ms");
+        registry.add("ecommerce.resilience.dependencies.payment.response-timeout", () -> "500ms");
     }
 
     @BeforeEach
@@ -74,6 +92,10 @@ abstract class AbstractCheckoutIT {
     @AfterEach
     void resetWireMock() {
         WIRE_MOCK.resetAll();
+        // Breakers are per-dependency singletons in the shared Spring context
+        // (ADR-017), so a failure-injection test would otherwise leave one OPEN
+        // for the next test class.
+        resilienceFactory.circuitBreakers().getAllCircuitBreakers().forEach(CircuitBreaker::reset);
     }
 
     ResultActions checkout(String idempotencyKey) throws Exception {

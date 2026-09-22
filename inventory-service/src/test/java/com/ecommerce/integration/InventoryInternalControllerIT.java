@@ -19,7 +19,9 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -73,6 +75,32 @@ class InventoryInternalControllerIT extends AbstractIntegrationTest {
         assertThat(inventoryService.getStock(2L).availableQuantity()).isEqualTo(5);
         assertThat(inventoryService.getStock(2L).reservedQuantity()).isEqualTo(0);
         assertThat(reservationRepository.findByOrderIdAndStatus(orderId, ReservationStatus.RELEASED)).hasSize(1);
+    }
+
+    /**
+     * Phase 7 (ADR-020): the read endpoint the order reconciliation job uses to
+     * learn the authoritative reservation state of a stuck order. Read-only, and
+     * SERVICE-only like the rest of {@code /internal/**}.
+     */
+    @Test
+    void reservationsByOrderReturnsAuthoritativeState() throws Exception {
+        inventoryService.initializeStock(new StockRequest(7L, "SKU-INT-7", 10));
+        UUID orderId = UUID.randomUUID();
+        inventoryService.reserve(new ReservationRequest(7L, 3, orderId));
+
+        mockMvc.perform(get("/internal/api/v1/inventory/reservations")
+                        .param("orderId", orderId.toString())
+                        .with(serviceToken()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].orderId").value(orderId.toString()))
+                .andExpect(jsonPath("$[0].status").value("RESERVED"))
+                .andExpect(jsonPath("$[0].quantity").value(3));
+
+        mockMvc.perform(get("/internal/api/v1/inventory/reservations")
+                        .param("orderId", UUID.randomUUID().toString())
+                        .with(serviceToken()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isEmpty());
     }
 
     @Test

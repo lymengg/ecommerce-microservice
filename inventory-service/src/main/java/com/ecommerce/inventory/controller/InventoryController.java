@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -68,5 +69,15 @@ public class InventoryController {
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void releaseByOrder(@Valid @RequestBody OrderActionRequest request) {
         inventoryService.releaseByOrder(request.orderId());
+    }
+
+    /**
+     * Authoritative reservation state for an order, for the order reconciliation
+     * job (ADR-020). Read-only and SERVICE-only; reconciliation asks the owning
+     * service rather than reading its tables (ADR-003).
+     */
+    @GetMapping("/reservations")
+    public List<ReservationResponse> reservationsByOrder(@RequestParam UUID orderId) {
+        return inventoryService.getReservations(orderId);
     }
 }

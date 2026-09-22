@@ -23,6 +23,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -61,6 +62,17 @@ public class InventoryService {
 
     @Transactional
     public ReservationResponse reserve(ReservationRequest request) {
+        // Idempotent per (orderId, productId) while RESERVED (ADR-019). A retry
+        // after a lost response must return the reservation that already exists
+        // rather than hold the same stock twice. The partial unique index is the
+        // backstop for two truly concurrent attempts; the lookup is what makes
+        // the ordinary retry a no-op.
+        InventoryReservation existing = reservationRepository
+                .findByOrderIdAndProductIdAndStatus(request.orderId(), request.productId(), ReservationStatus.RESERVED)
+                .orElse(null);
+        if (existing != null) {
+            return toReservationResponse(existing);
+        }
         requireItem(request.productId());
         int updated = itemRepository.reserve(request.productId(), request.quantity());
         if (updated == 0) {
@@ -130,6 +142,18 @@ public class InventoryService {
     @Transactional
     public StockResponse getStock(Long productId) {
         return toStockResponse(requireItem(productId));
+    }
+
+    /**
+     * Authoritative reservation state for one order, read by the order
+     * reconciliation job (ADR-020). Read-only: reconciliation never mutates
+     * another service's tables, it asks the owner.
+     */
+    @Transactional(readOnly = true)
+    public List<ReservationResponse> getReservations(UUID orderId) {
+        return reservationRepository.findByOrderId(orderId).stream()
+                .map(this::toReservationResponse)
+                .toList();
     }
 
     @Scheduled(fixedDelayString = "${ecommerce.inventory.expiry-interval-ms:60000}")

@@ -11,6 +11,8 @@ import com.ecommerce.checkout.dto.CheckoutRequest;
 import com.ecommerce.checkout.dto.CheckoutResponse;
 import com.ecommerce.common.error.ConflictException;
 import com.ecommerce.common.error.InsufficientStockException;
+import com.ecommerce.common.error.ServiceUnavailableException;
+import com.ecommerce.common.resilience.ResilienceProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -36,7 +38,7 @@ class CheckoutServiceTest {
     private final InventoryClient inventoryClient = mock(InventoryClient.class);
     private final PaymentClient paymentClient = mock(PaymentClient.class);
     private final CheckoutService checkoutService =
-            new CheckoutService(cartClient, orderClient, inventoryClient, paymentClient);
+            new CheckoutService(cartClient, orderClient, inventoryClient, paymentClient, new ResilienceProperties());
 
     private final UUID cartId = UUID.randomUUID();
     private final UUID orderId = UUID.randomUUID();
@@ -97,6 +99,55 @@ class CheckoutServiceTest {
         verify(inventoryClient).releaseByOrder(orderId);
         verify(orderClient).cancel(eq(orderId), eq("INSUFFICIENT_STOCK"));
         verify(paymentClient, never()).initiate(any(), any());
+    }
+
+    /**
+     * The gap Phase 7 closes (ADR-017). Before this, only a business rejection
+     * compensated; an inventory-service that could not answer left the order in
+     * PENDING with stock still held.
+     */
+    @Test
+    void checkoutCompensatesWhenInventoryIsUnreachable() {
+        doThrow(new ServiceUnavailableException("Could not reach inventory within its timeout budget"))
+                .when(inventoryClient).reserve(1L, 2, orderId);
+
+        assertThatThrownBy(() -> checkoutService.checkout(new CheckoutRequest(cartId, null, null), customerId, null))
+                .isInstanceOf(ServiceUnavailableException.class);
+
+        verify(inventoryClient).releaseByOrder(orderId);
+        verify(orderClient).cancel(eq(orderId), eq("INVENTORY_UNAVAILABLE"));
+        verify(paymentClient, never()).initiate(any(), any());
+    }
+
+    @Test
+    void checkoutCompensatesWhenAnOrderTransitionCannotBeReached() {
+        doThrow(new ServiceUnavailableException("Could not reach order within its timeout budget"))
+                .when(orderClient).markPaymentPending(orderId);
+
+        assertThatThrownBy(() -> checkoutService.checkout(new CheckoutRequest(cartId, null, null), customerId, null))
+                .isInstanceOf(ServiceUnavailableException.class);
+
+        verify(inventoryClient).releaseByOrder(orderId);
+        verify(orderClient).cancel(eq(orderId), eq("INVENTORY_UNAVAILABLE"));
+    }
+
+    /**
+     * A payment that cannot be reached is deliberately <em>not</em> compensated:
+     * initiation is idempotent and already retried, the payment may in fact have
+     * been recorded, and cancelling would then destroy a paid order. The order
+     * stays recoverable and the reconciliation job decides (ADR-020).
+     */
+    @Test
+    void checkoutLeavesTheOrderRecoverableWhenPaymentIsUnreachable() {
+        when(paymentClient.initiate(any(), any()))
+                .thenThrow(new ServiceUnavailableException("Could not reach payment within its timeout budget"));
+
+        assertThatThrownBy(() -> checkoutService.checkout(new CheckoutRequest(cartId, null, null), customerId, null))
+                .isInstanceOf(ServiceUnavailableException.class);
+
+        verify(inventoryClient, never()).releaseByOrder(orderId);
+        verify(orderClient, never()).cancel(any(), any());
+        verify(cartClient, never()).markCheckedOut(cartId);
     }
 
     @Test
